@@ -38,7 +38,7 @@ cd ~/LocalForge-AI
 - Project Explorer พร้อมเปิด/rename/delete/Terminal/Browser
 - หลายบทสนทนา ค้นหา ปักหมุด แก้ไข สร้างใหม่ ลบ และ export
 - Context Inspector พร้อม token meter, trim และ summary
-- Markdown highlighting, copy/code-copy, ฟอนต์ไทย, theme และ UI scaling
+- Markdown highlighting, copy/code-copy, UI ไทย/English/中文/日本語, theme และ UI scaling
 - CPU/RAM/GPU/VRAM/temperature monitor และ desktop notification
 
 ## คีย์ลัด

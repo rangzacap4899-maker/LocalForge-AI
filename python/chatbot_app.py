@@ -31,6 +31,12 @@ from localforge_core import (
     inspect_model,
     select_recent_messages,
 )
+from localforge_i18n import (
+    LANGUAGE_CODES,
+    LANGUAGE_FONTS,
+    LANGUAGE_NAMES,
+    translate,
+)
 
 
 USER_AGENT = "LocalForgeAI/1.0"
@@ -935,6 +941,13 @@ class ChatApp(ctk.CTk):
         self.history_file = self.state_dir / "conversation.json"
         self.settings_file = self.state_dir / "settings.json"
         preferences = self._load_preferences()
+        language = str(preferences.get("language", "th"))
+        if language not in LANGUAGE_NAMES:
+            language = "th"
+        self.language_var = ctk.StringVar(value=language)
+        self.language_name_var = ctk.StringVar(value=LANGUAGE_NAMES[language])
+        global THAI_FONT
+        THAI_FONT = LANGUAGE_FONTS[language]
         self.model_manager = LocalModelManager(
             Path(os.environ.get("LOCALFORGE_MODEL_ROOT", os.environ.get("GEMMA_MODEL_ROOT", DEFAULT_MODEL_ROOT))),
             Path(os.environ.get("LLAMA_SERVER_BIN", DEFAULT_SERVER_BIN)),
@@ -954,7 +967,7 @@ class ChatApp(ctk.CTk):
         self.model_var = ctk.StringVar(value=os.environ.get("GEMMA_MODEL", "gemma3-4b"))
         self.selected_model_var = ctk.StringVar(value=preferences.get("selected_model", ""))
         self.download_model_var = ctk.StringVar(value=next(iter(MODEL_CATALOG)))
-        self.model_status_var = ctk.StringVar(value="ยังไม่ได้โหลดโมเดล")
+        self.model_status_var = ctk.StringVar(value=self._t("model_off"))
         self.auto_router_var = ctk.BooleanVar(value=bool(preferences.get("auto_router", True)))
         self.appearance_var = ctk.StringVar(value=str(preferences.get("appearance", "Dark")))
         saved_scale = max(0.85, min(1.25, float(preferences.get("font_scale", 1.0))))
@@ -979,6 +992,9 @@ class ChatApp(ctk.CTk):
         self._build_ui()
         self.after(80, self._poll_events)
         self.after(1000, self._update_system_monitor)
+
+    def _t(self, key: str, **values: Any) -> str:
+        return translate(self.language_var.get(), key, **values)
 
     def _load_preferences(self) -> dict[str, Any]:
         try:
@@ -1005,6 +1021,7 @@ class ChatApp(ctk.CTk):
             "auto_router": bool(self.auto_router_var.get()),
             "appearance": self.appearance_var.get(),
             "font_scale": float(self.font_scale_var.get()),
+            "language": self.language_var.get(),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load_history(self) -> list[dict[str, Any]]:
@@ -1075,7 +1092,7 @@ class ChatApp(ctk.CTk):
         ).pack(anchor="w")
 
         ctk.CTkButton(
-            side, text="＋  บทสนทนาใหม่", height=42, corner_radius=21,
+            side, text=self._t("new_chat"), height=42, corner_radius=21,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=ctk.CTkFont(size=14, weight="bold"), command=self._clear
         ).pack(fill="x", padx=18, pady=(0, 16))
@@ -1087,7 +1104,7 @@ class ChatApp(ctk.CTk):
         sidebar_footer = ctk.CTkFrame(side, fg_color=self.SIDEBAR)
         sidebar_footer.pack(side="bottom", fill="x")
         self.settings_button = ctk.CTkButton(
-            sidebar_footer, text="⚙  ตั้งค่า", height=40, corner_radius=20,
+            sidebar_footer, text=self._t("settings"), height=40, corner_radius=20,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             font=ctk.CTkFont(size=13, weight="bold"), command=self._open_settings
         )
@@ -1109,12 +1126,12 @@ class ChatApp(ctk.CTk):
         )
         self.workspace_label.pack(fill="x", pady=(7, 9))
         ctk.CTkButton(
-            workspace_card, text="▣  เปลี่ยนโฟลเดอร์", height=36, corner_radius=18,
+            workspace_card, text=self._t("change_folder"), height=36, corner_radius=18,
             fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT,
             command=self._choose_workspace
         ).pack(fill="x")
         ctk.CTkButton(
-            workspace_card, text="◫  Project Explorer", height=34, corner_radius=18,
+            workspace_card, text=self._t("project_explorer"), height=34, corner_radius=18,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
             command=self._open_project_explorer,
         ).pack(fill="x", pady=(4, 0))
@@ -1122,13 +1139,13 @@ class ChatApp(ctk.CTk):
         conversations = ctk.CTkFrame(side, fg_color="transparent")
         conversations.pack(fill="both", expand=True, padx=18, pady=(18, 6))
         ctk.CTkLabel(
-            conversations, text="บทสนทนา", anchor="w", text_color=self.MUTED,
+            conversations, text=self._t("conversations"), anchor="w", text_color=self.MUTED,
             font=ctk.CTkFont(family=THAI_FONT, size=10, weight="bold")
         ).pack(fill="x")
         self.conversation_search_var = ctk.StringVar()
         search = ctk.CTkEntry(
             conversations, textvariable=self.conversation_search_var,
-            placeholder_text="ค้นหาบทสนทนา…", height=32,
+            placeholder_text=self._t("search_conversations"), height=32,
             font=ctk.CTkFont(family=THAI_FONT, size=11),
         )
         search.pack(fill="x", pady=(6, 6))
@@ -1140,12 +1157,12 @@ class ChatApp(ctk.CTk):
         self.conversation_list.pack(fill="both", expand=True)
         convo_actions = ctk.CTkFrame(conversations, fg_color="transparent")
         convo_actions.pack(fill="x", pady=(6, 0))
-        ctk.CTkButton(convo_actions, text="ส่งออก", width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._export_conversation).pack(side="left", padx=(0, 3))
-        ctk.CTkButton(convo_actions, text="ปักหมุด", width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._pin_conversation).pack(side="left", padx=3)
-        ctk.CTkButton(convo_actions, text="ลบ", width=55, height=28, corner_radius=14, fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT, command=self._delete_conversation).pack(side="right")
+        ctk.CTkButton(convo_actions, text=self._t("export"), width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._export_conversation).pack(side="left", padx=(0, 3))
+        ctk.CTkButton(convo_actions, text=self._t("pin"), width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._pin_conversation).pack(side="left", padx=3)
+        ctk.CTkButton(convo_actions, text=self._t("delete"), width=55, height=28, corner_radius=14, fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT, command=self._delete_conversation).pack(side="right")
         self._refresh_conversations()
         ctk.CTkButton(
-            workspace_card, text="↶  ย้อนคืนล่าสุด", height=34, corner_radius=18,
+            workspace_card, text=self._t("undo"), height=34, corner_radius=18,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
             command=self._undo_files,
         ).pack(fill="x", pady=(4, 0))
@@ -1161,11 +1178,11 @@ class ChatApp(ctk.CTk):
         title_box = ctk.CTkFrame(header, fg_color="transparent")
         title_box.pack(side="left", pady=17)
         ctk.CTkLabel(
-            title_box, text="ผู้ช่วยของคุณ", anchor="w", text_color=self.TEXT,
+            title_box, text=self._t("your_assistant"), anchor="w", text_color=self.TEXT,
             font=ctk.CTkFont(size=20, weight="bold")
         ).pack(anchor="w")
         ctk.CTkLabel(
-            title_box, text="สนทนา • สร้างไฟล์ • ค้นหาข้อมูล", anchor="w",
+            title_box, text=self._t("tagline"), anchor="w",
             text_color=self.MUTED, font=ctk.CTkFont(size=12)
         ).pack(anchor="w")
         status_box = ctk.CTkFrame(header, fg_color=self.PANEL, corner_radius=14)
@@ -1173,7 +1190,7 @@ class ChatApp(ctk.CTk):
         self.status_dot = ctk.CTkLabel(status_box, text="●", text_color=self.MUTED, font=ctk.CTkFont(size=11))
         self.status_dot.pack(side="left", padx=(11, 5))
         self.status = ctk.CTkLabel(
-            status_box, text="โมเดลปิดอยู่", text_color=self.MUTED,
+            status_box, text=self._t("model_off"), text_color=self.MUTED,
             font=ctk.CTkFont(size=11)
         )
         self.status.pack(side="left", padx=(0, 11), pady=6)
@@ -1207,22 +1224,22 @@ class ChatApp(ctk.CTk):
         self.input.bind("<Control-Return>", self._send_event)
         self._bind_edit_menu(self.input, readonly=False)
         self.send_button = ctk.CTkButton(
-            composer, text="ส่ง  ➜", width=94, height=48, corner_radius=8,
+            composer, text=self._t("send"), width=94, height=48, corner_radius=8,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
             font=ctk.CTkFont(size=14, weight="bold"), command=self.send
         )
         self.send_button.grid(row=0, column=1, padx=(0, 12), pady=12)
         self.stop_button = ctk.CTkButton(
-            composer, text="หยุด ■", width=94, height=48, corner_radius=8,
+            composer, text=self._t("stop"), width=94, height=48, corner_radius=8,
             fg_color=("#EF4444", "#8D3D52"), hover_color=("#DC2626", "#A34860"),
             font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold"),
             command=self._cancel_generation,
         )
         if self.messages:
             for index, message in enumerate(self.messages):
-                self._append("คุณ" if message["role"] == "user" else "LocalForge", message["content"], message_index=index)
+                self._append(self._t("you") if message["role"] == "user" else "LocalForge", message["content"], message_index=index)
         else:
-            self._append("ระบบ", "พร้อมแล้ว — ถามคำถาม หรือสั่งให้อ่าน/เขียนไฟล์และค้นเว็บได้เลย")
+            self._append(self._t("system"), self._t("ready"))
         self._update_context_meter()
 
     def _bind_edit_menu(self, widget: Any, readonly: bool) -> None:
@@ -1262,12 +1279,12 @@ class ChatApp(ctk.CTk):
             target.mark_set("insert", "1.0")
             target.see("1.0")
 
-        menu.add_command(label="คัดลอก", command=copy_selection)
+        menu.add_command(label=self._t("copy"), command=copy_selection)
         if not readonly:
-            menu.add_command(label="วาง", command=paste_clipboard)
-            menu.add_command(label="ตัด", command=cut_selection)
+            menu.add_command(label=self._t("paste"), command=paste_clipboard)
+            menu.add_command(label=self._t("cut"), command=cut_selection)
         menu.add_separator()
-        menu.add_command(label="เลือกทั้งหมด", command=select_all)
+        menu.add_command(label=self._t("select_all"), command=select_all)
 
         def popup(event: Any) -> str:
             try:
@@ -1288,27 +1305,31 @@ class ChatApp(ctk.CTk):
         self.clipboard_append(text)
         self.update_idletasks()
         if button is not None:
-            button.configure(text="คัดลอกแล้ว ✓")
-            self.after(1200, lambda: button.winfo_exists() and button.configure(text="คัดลอก"))
+            button.configure(text=self._t("copied"))
+            self.after(1200, lambda: button.winfo_exists() and button.configure(text=self._t("copy")))
 
     def _append(
         self, who: str, text: str, token_count: int | None = None,
         metrics: dict[str, Any] | None = None, message_index: int | None = None,
     ) -> dict[str, Any]:
-        is_user = who == "คุณ"
-        is_system = who in {"ระบบ", "ข้อผิดพลาด"}
+        user_labels = {translate(code, "you") for code in LANGUAGE_NAMES}
+        system_labels = {translate(code, "system") for code in LANGUAGE_NAMES}
+        error_labels = {translate(code, "error") for code in LANGUAGE_NAMES}
+        is_user = who in user_labels
+        is_error = who in error_labels
+        is_system = who in system_labels or is_error
         row = ctk.CTkFrame(self.chat, fg_color="transparent")
         row.grid(sticky="ew", padx=8, pady=7)
         row.grid_columnconfigure(0, weight=1)
         bubble = ctk.CTkFrame(
             row,
-            fg_color=(("#FEF2F2", "#3B2430") if who == "ข้อผิดพลาด" else self.PANEL if is_system else self.USER_BUBBLE if is_user else self.BOT_BUBBLE),
+            fg_color=(("#FEF2F2", "#3B2430") if is_error else self.PANEL if is_system else self.USER_BUBBLE if is_user else self.BOT_BUBBLE),
             corner_radius=12,
             border_width=1 if not is_user else 0,
-            border_color=("#FECACA", "#5C2B3B") if who == "ข้อผิดพลาด" else self.BORDER,
+            border_color=("#FECACA", "#5C2B3B") if is_error else self.BORDER,
         )
         bubble.grid(row=0, column=0, sticky="e" if is_user else "w", padx=(110, 0) if is_user else (0, 110))
-        label_color = ("#EF4444", "#FF9EAE") if who == "ข้อผิดพลาด" else ("#6366F1", "#C8BBFF") if not is_user else ("#4F46E5", "#E4DFFF")
+        label_color = ("#EF4444", "#FF9EAE") if is_error else ("#6366F1", "#C8BBFF") if not is_user else ("#4F46E5", "#E4DFFF")
         ctk.CTkLabel(
             bubble, text=who.upper(), anchor="w", text_color=label_color,
             font=ctk.CTkFont(size=10, weight="bold")
@@ -1352,7 +1373,7 @@ class ChatApp(ctk.CTk):
             )
             token_label.pack(side="left")
             copy_button = ctk.CTkButton(
-                footer, text="คัดลอก", width=74, height=26, corner_radius=8,
+                footer, text=self._t("copy"), width=74, height=26, corner_radius=8,
                 fg_color="transparent", hover_color=self.PANEL_HOVER,
                 border_width=1, border_color=self.BORDER, text_color=self.MUTED,
                 font=ctk.CTkFont(family=THAI_FONT, size=10)
@@ -1362,33 +1383,33 @@ class ChatApp(ctk.CTk):
             code_blocks = re.findall(r"```(?:[\w.+-]+)?\n(.*?)```", text, re.S)
             for block_index, code in enumerate(code_blocks[:2], 1):
                 ctk.CTkButton(
-                    footer, text=f"คัดลอกโค้ด {block_index}", width=86, height=26,
+                    footer, text=self._t("copy_code", index=block_index), width=86, height=26,
                     fg_color="transparent", hover_color=self.PANEL_HOVER,
                     border_width=1, border_color=self.BORDER, text_color=self.MUTED,
                     command=lambda value=code.strip(): self._copy_text(value),
                 ).pack(side="right", padx=3)
             if "สร้างไฟล์" in text or "เขียนไฟล์" in text:
                 ctk.CTkButton(
-                    footer, text="เปิดโปรเจกต์", width=82, height=26,
+                    footer, text=self._t("open_project"), width=82, height=26,
                     fg_color="transparent", hover_color=self.PANEL_HOVER,
                     border_width=1, border_color=self.BORDER, text_color=self.MUTED,
                     command=self._open_project_explorer,
                 ).pack(side="right", padx=3)
         if message_index is not None and not is_system:
             ctk.CTkButton(
-                footer, text="ลบ", width=42, height=26, corner_radius=8,
+                footer, text=self._t("delete"), width=42, height=26, corner_radius=8,
                 fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.MUTED,
                 command=lambda index=message_index: self._delete_message(index),
             ).pack(side="right", padx=4)
             if is_user:
                 ctk.CTkButton(
-                    footer, text="แก้ไข", width=52, height=26, corner_radius=8,
+                    footer, text=self._t("edit"), width=52, height=26, corner_radius=8,
                     fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
                     command=lambda index=message_index: self._edit_message(index),
                 ).pack(side="right", padx=4)
             else:
                 ctk.CTkButton(
-                    footer, text="สร้างใหม่", width=66, height=26, corner_radius=8,
+                    footer, text=self._t("regenerate"), width=66, height=26, corner_radius=8,
                     fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
                     command=lambda index=message_index: self._regenerate_message(index),
                 ).pack(side="right", padx=4)
@@ -1452,6 +1473,10 @@ class ChatApp(ctk.CTk):
         ctk.set_widget_scaling(scale)
         ctk.set_window_scaling(scale)
 
+    def _select_language(self, display_name: str) -> None:
+        self.language_var.set(LANGUAGE_CODES.get(display_name, "en"))
+        self._save_preferences()
+
     def _notify_finished(self) -> None:
         notifier = shutil.which("notify-send")
         if notifier and self.focus_displayof() is None:
@@ -1465,7 +1490,7 @@ class ChatApp(ctk.CTk):
             child.destroy()
         for index, message in enumerate(self.messages):
             self._append(
-                "คุณ" if message.get("role") == "user" else "LocalForge",
+                self._t("you") if message.get("role") == "user" else "LocalForge",
                 str(message.get("content", "")), message_index=index,
             )
         self._update_context_meter()
@@ -1721,7 +1746,7 @@ class ChatApp(ctk.CTk):
         try:
             restored = self.file_transaction.undo()
             self.changed_files.update(restored)
-            self._append("ระบบ", "ย้อนคืนแล้ว: " + ", ".join(restored))
+            self._append(self._t("system"), "ย้อนคืนแล้ว: " + ", ".join(restored))
         except Exception as exc:
             messagebox.showwarning("ย้อนคืนไม่ได้", str(exc))
 
@@ -1846,7 +1871,7 @@ class ChatApp(ctk.CTk):
 
     def _model_choices(self) -> list[str]:
         models = self.model_manager.models()
-        return [str(path) for path in models] or ["(ยังไม่มีโมเดล GGUF)"]
+        return [str(path) for path in models] or [self._t("no_models")]
 
     def _model_selected(self, value: str | None = None) -> None:
         value = value or self.selected_model_var.get()
@@ -1863,7 +1888,7 @@ class ChatApp(ctk.CTk):
 
     def _load_selected_model(self) -> None:
         value = self.selected_model_var.get()
-        if not value or value.startswith("("):
+        if not value or not Path(value).is_file():
             messagebox.showwarning("เลือกโมเดล", "กรุณาเลือกไฟล์โมเดลก่อน")
             return
         self.model_status_var.set("กำลังโหลดโมเดล…")
@@ -1911,7 +1936,7 @@ class ChatApp(ctk.CTk):
 
     def _delete_selected_model(self) -> None:
         value = self.selected_model_var.get()
-        if not value or value.startswith("("):
+        if not value or not Path(value).is_file():
             return
         if not messagebox.askyesno("ลบโมเดล", f"ต้องการลบ {Path(value).name} หรือไม่?"):
             return
@@ -1954,7 +1979,7 @@ class ChatApp(ctk.CTk):
         # laying out its children, leaving a permanently blank surface. Build
         # it while withdrawn and reveal it after idle layout has completed.
         window.withdraw()
-        window.title("ตั้งค่า — LocalForge AI")
+        window.title(f"{self._t('settings_title')} — LocalForge AI")
         window.geometry("620x720")
         window.minsize(560, 620)
         window.resizable(True, True)
@@ -1975,11 +2000,11 @@ class ChatApp(ctk.CTk):
         content = ctk.CTkScrollableFrame(window, fg_color="transparent")
         content.pack(fill="both", expand=True)
         ctk.CTkLabel(
-            content, text="ตั้งค่า", anchor="w", text_color=self.TEXT,
+            content, text=self._t("settings_title"), anchor="w", text_color=self.TEXT,
             font=ctk.CTkFont(size=24, weight="bold")
         ).pack(fill="x", padx=28, pady=(27, 4))
         ctk.CTkLabel(
-            content, text="จัดการโมเดล การเชื่อมต่อ และโหมดการทำงาน",
+            content, text=self._t("settings_subtitle"),
             anchor="w", text_color=self.MUTED, font=ctk.CTkFont(size=12)
         ).pack(fill="x", padx=28, pady=(0, 22))
 
@@ -1994,7 +2019,7 @@ class ChatApp(ctk.CTk):
             card, textvariable=self.api_url_var, height=40, corner_radius=9,
             fg_color=self.BG, border_color=self.BORDER, text_color=self.TEXT
         ).pack(fill="x", padx=16, pady=(6, 14))
-        ctk.CTkLabel(card, text="โมเดลที่ติดตั้ง", anchor="w", text_color=self.MUTED,
+        ctk.CTkLabel(card, text=self._t("installed_models"), anchor="w", text_color=self.MUTED,
                      font=ctk.CTkFont(family=THAI_FONT, size=10, weight="bold")).pack(fill="x", padx=16)
         choices = self._model_choices()
         if self.selected_model_var.get() not in choices:
@@ -2016,12 +2041,12 @@ class ChatApp(ctk.CTk):
         model_buttons = ctk.CTkFrame(card, fg_color="transparent")
         model_buttons.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkButton(
-            model_buttons, text="โหลดโมเดล", height=38, command=self._load_selected_model,
+            model_buttons, text=self._t("load_model"), height=38, command=self._load_selected_model,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold")
         ).pack(side="left", fill="x", expand=True, padx=(0, 5))
         ctk.CTkButton(
-            model_buttons, text="ปิดโมเดล", height=38, command=self._stop_model,
+            model_buttons, text=self._t("stop_model"), height=38, command=self._stop_model,
             fg_color=("#EF4444", "#8D3D52"), hover_color=("#DC2626", "#A34860"), text_color="#FFFFFF",
             font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold")
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
@@ -2032,7 +2057,7 @@ class ChatApp(ctk.CTk):
             fg_color=self.PANEL_HOVER, hover_color=self.BORDER, text_color=self.TEXT,
         ).pack(side="left", fill="x", expand=True, padx=(0, 5))
         ctk.CTkButton(
-            utility_buttons, text="ลบโมเดล", height=34, command=self._delete_selected_model,
+            utility_buttons, text=self._t("delete_model"), height=34, command=self._delete_selected_model,
             fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT,
             border_width=1, border_color=("#FECACA", "#713747"),
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
@@ -2043,7 +2068,7 @@ class ChatApp(ctk.CTk):
         router_row = ctk.CTkFrame(card, fg_color="transparent")
         router_row.pack(fill="x", padx=16, pady=(0, 14))
         ctk.CTkLabel(
-            router_row, text="เลือกโมเดลอัตโนมัติตามงาน", text_color=self.TEXT,
+            router_row, text=self._t("auto_router"), text_color=self.TEXT,
             font=ctk.CTkFont(family=THAI_FONT, size=11, weight="bold")
         ).pack(side="left")
         ctk.CTkSwitch(
@@ -2055,7 +2080,7 @@ class ChatApp(ctk.CTk):
         agent_text = ctk.CTkFrame(agent_row, fg_color="transparent")
         agent_text.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
-            agent_text, text="โหมด Multi-agent", anchor="w", text_color=self.TEXT,
+            agent_text, text=self._t("multi_agent"), anchor="w", text_color=self.TEXT,
             font=ctk.CTkFont(size=12, weight="bold")
         ).pack(fill="x")
         ctk.CTkLabel(
@@ -2072,11 +2097,11 @@ class ChatApp(ctk.CTk):
         )
         download_card.pack(fill="x", padx=28, pady=(14, 0))
         ctk.CTkLabel(
-            download_card, text="ดาวน์โหลดโมเดล", anchor="w", text_color=self.TEXT,
+            download_card, text=self._t("download_models"), anchor="w", text_color=self.TEXT,
             font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold")
         ).pack(fill="x", padx=16, pady=(15, 2))
         ctk.CTkLabel(
-            download_card, text=f"โมเดลจะเก็บไว้ใน {self.model_manager.root}",
+            download_card, text=self._t("models_location", path=self.model_manager.root),
             anchor="w", text_color=self.MUTED, font=ctk.CTkFont(family=THAI_FONT, size=10)
         ).pack(fill="x", padx=16, pady=(0, 9))
         ctk.CTkOptionMenu(
@@ -2086,7 +2111,7 @@ class ChatApp(ctk.CTk):
             dropdown_font=ctk.CTkFont(family=THAI_FONT, size=11)
         ).pack(fill="x", padx=16, pady=(0, 9))
         ctk.CTkButton(
-            download_card, text="ดาวน์โหลด", height=38, command=self._download_selected_model,
+            download_card, text=self._t("download"), height=38, command=self._download_selected_model,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold")
         ).pack(fill="x", padx=16, pady=(0, 16))
@@ -2096,7 +2121,7 @@ class ChatApp(ctk.CTk):
         self.download_progress.set(0)
         self.download_progress.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkButton(
-            download_card, text="ยกเลิกดาวน์โหลด", height=32,
+            download_card, text=self._t("cancel_download"), height=32,
             command=self._cancel_download, fg_color="transparent", text_color=self.TEXT,
             border_width=1, border_color=self.BORDER,
         ).pack(fill="x", padx=16, pady=(0, 16))
@@ -2107,9 +2132,27 @@ class ChatApp(ctk.CTk):
         )
         display_card.pack(fill="x", padx=28, pady=(14, 0))
         ctk.CTkLabel(
-            display_card, text="การแสดงผล", anchor="w", text_color=self.TEXT,
+            display_card, text=self._t("display"), anchor="w", text_color=self.TEXT,
             font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold"),
         ).pack(fill="x", padx=16, pady=(15, 8))
+        language_row = ctk.CTkFrame(display_card, fg_color="transparent")
+        language_row.pack(fill="x", padx=16, pady=(0, 12))
+        language_text = ctk.CTkFrame(language_row, fg_color="transparent")
+        language_text.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            language_text, text=self._t("language"), anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(family=THAI_FONT, size=11, weight="bold"),
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            language_text, text=self._t("restart_language"), anchor="w", text_color=self.MUTED,
+            font=ctk.CTkFont(family=THAI_FONT, size=9),
+        ).pack(fill="x")
+        ctk.CTkOptionMenu(
+            language_row, variable=self.language_name_var,
+            values=list(LANGUAGE_CODES), command=self._select_language,
+            width=135, font=ctk.CTkFont(family=THAI_FONT, size=11),
+            dropdown_font=ctk.CTkFont(family=THAI_FONT, size=11),
+        ).pack(side="right", padx=(10, 0))
         ctk.CTkSegmentedButton(
             display_card, values=["Dark", "Light", "System"],
             variable=self.appearance_var, command=self._apply_display_settings,
@@ -2120,7 +2163,7 @@ class ChatApp(ctk.CTk):
         scale_header = ctk.CTkFrame(display_card, fg_color="transparent")
         scale_header.pack(fill="x", padx=16)
         ctk.CTkLabel(
-            scale_header, text="ขนาด UI", anchor="w", text_color=self.MUTED,
+            scale_header, text=self._t("ui_size"), anchor="w", text_color=self.MUTED,
             font=ctk.CTkFont(family=THAI_FONT, size=10),
         ).pack(side="left")
         ctk.CTkLabel(
@@ -2133,7 +2176,7 @@ class ChatApp(ctk.CTk):
         ).pack(fill="x", padx=16, pady=(6, 16))
 
         ctk.CTkButton(
-            content, text="เสร็จสิ้น", height=40, corner_radius=11,
+            content, text=self._t("done"), height=40, corner_radius=11,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
             font=ctk.CTkFont(size=13, weight="bold"), command=close_settings
         ).pack(fill="x", padx=28, pady=20)
@@ -2159,7 +2202,7 @@ class ChatApp(ctk.CTk):
         self._save_history()
         self._render_messages()
         self._refresh_conversations()
-        self._append("ระบบ", "เริ่มบทสนทนาใหม่แล้ว มีอะไรให้ช่วยสร้างวันนี้?")
+        self._append(self._t("system"), self._t("ready"))
 
     def _send_event(self, _event: Any) -> str:
         self.send()
@@ -2175,7 +2218,7 @@ class ChatApp(ctk.CTk):
             messagebox.showwarning("ยังไม่ได้โหลดโมเดล", "เปิดเมนูตั้งค่า เลือกโมเดล แล้วกด ‘โหลดโมเดล’ ก่อนส่งข้อความ")
             return
         self.input.delete("1.0", "end")
-        self._append("คุณ", text)
+        self._append(self._t("you"), text)
         self.messages.append({"role": "user", "content": text})
         self._save_history()
         self.busy = True
@@ -2508,7 +2551,7 @@ class ChatApp(ctk.CTk):
             elif kind == "tool":
                 self.status.configure(text=text[:38] + ("…" if len(text) > 38 else ""))
             elif kind == "error":
-                self._append("ข้อผิดพลาด", text)
+                self._append(self._t("error"), text)
                 messagebox.showerror("เกิดข้อผิดพลาด", text)
             elif kind == "model_loaded":
                 self.model_status_var.set(f"กำลังใช้งาน: {text}")
