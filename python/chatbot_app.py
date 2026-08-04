@@ -1034,17 +1034,17 @@ class LocalModelManager:
 
 
 class ChatApp(ctk.CTk):
-    BG = ("#FFFFFF", "#1E1E1E")
-    SIDEBAR = ("#F6F5F4", "#2A2A2A")
-    PANEL = ("#F6F5F4", "#383838")
-    PANEL_HOVER = ("#E5E5E5", "#4A4A4A")
-    BORDER = ("#E0E0E0", "#404040")
-    TEXT = ("#000000", "#FFFFFF")
-    MUTED = ("#77767B", "#9A9996")
-    ACCENT = ("#3584E4", "#3584E4")
-    ACCENT_HOVER = ("#1C71D8", "#1C71D8")
-    USER_BUBBLE = ("#E5E5E5", "#383838")
-    BOT_BUBBLE = ("#FFFFFF", "#2A2A2A")
+    BG = ("#0B0F19", "#0B0F19")
+    SIDEBAR = ("#111827", "#111827")
+    PANEL = ("#151D2E", "#151D2E")
+    PANEL_HOVER = ("#1B263B", "#1B263B")
+    BORDER = ("#22304A", "#22304A")
+    TEXT = ("#F3F6FC", "#F3F6FC")
+    MUTED = ("#8CA0BE", "#8CA0BE")
+    ACCENT = ("#7C5CFC", "#7C5CFC")
+    ACCENT_HOVER = ("#6246CC", "#6246CC")
+    USER_BUBBLE = ("#4E3FBE", "#4E3FBE")
+    BOT_BUBBLE = ("#172238", "#172238")
 
     def _resolve_color(self, color: tuple[str, str] | str) -> str:
         if isinstance(color, tuple):
@@ -1216,27 +1216,28 @@ class ChatApp(ctk.CTk):
         side.grid_propagate(False)
         self.bind("<Configure>", self._responsive_layout, add="+")
         brand = ctk.CTkFrame(side, fg_color="transparent")
-        brand.pack(fill="x", padx=22, pady=(25, 22))
-        ctk.CTkLabel(
-            brand, text="✦", width=42, height=42, corner_radius=10,
-            fg_color=self.ACCENT, text_color="white", font=ctk.CTkFont(size=22, weight="bold")
-        ).pack(side="left")
+        brand.pack(fill="x", padx=14, pady=(16, 16))
+        icon_box = ctk.CTkFrame(brand, width=30, height=30, corner_radius=8, fg_color=self.ACCENT)
+        icon_box.pack(side="left")
+        icon_box.pack_propagate(False)
+        ctk.CTkLabel(icon_box, text="⚙", text_color="#FFFFFF", font=ctk.CTkFont(size=16)).pack(expand=True)
         brand_text = ctk.CTkFrame(brand, fg_color="transparent")
-        brand_text.pack(side="left", padx=12)
+        brand_text.pack(side="left", padx=9)
         ctk.CTkLabel(
-            brand_text, text="LOCALFORGE AI", anchor="w", text_color=self.TEXT,
-            font=ctk.CTkFont(size=19, weight="bold")
-        ).pack(anchor="w")
+            brand_text, text="LocalForge AI", anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(size=13, weight="bold")
+        ).pack(anchor="w", pady=(0, 0))
         ctk.CTkLabel(
-            brand_text, text="LOCAL AI WORKSPACE", anchor="w", text_color=self.MUTED,
-            font=ctk.CTkFont(size=10, weight="bold")
-        ).pack(anchor="w")
+            brand_text, text="โมเดลภาษาในเครื่อง", anchor="w", text_color=self.MUTED,
+            font=ctk.CTkFont(size=11)
+        ).pack(anchor="w", pady=(0, 0))
 
         ctk.CTkButton(
-            side, text=self._t("new_chat"), height=42, corner_radius=21,
-            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
-            font=ctk.CTkFont(size=14, weight="bold"), command=self._clear
-        ).pack(fill="x", padx=18, pady=(0, 16))
+            side, text="＋ " + self._t("new_chat"), height=32, corner_radius=8,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color="#B9A8FF",
+            border_width=1, border_color=self.ACCENT,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._clear
+        ).pack(fill="x", padx=14, pady=(0, 18))
 
         # Reserve the sidebar footer before adding expandable content.  Tk's
         # packer allocates space in packing order; placing this after the
@@ -1250,46 +1251,61 @@ class ChatApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"), command=self._open_settings
         )
         self.settings_button.pack(fill="x", padx=18, pady=(4, 2))
-        self.system_monitor = ctk.CTkLabel(
-            sidebar_footer, text="RAM — • GPU —", text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=10)
-        )
-        self.system_monitor.pack(pady=(8, 14))
+        self.system_monitor = ctk.CTkFrame(sidebar_footer, fg_color="transparent")
+        self.system_monitor.pack(fill="x", padx=14, pady=(8, 14))
+        self.sys_cpu = ctk.CTkLabel(self.system_monitor, text="CPU —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color="#C7D2E3")
+        self.sys_cpu.grid(row=0, column=0, sticky="ew", padx=(0, 2), pady=(0, 4))
+        self.sys_ram = ctk.CTkLabel(self.system_monitor, text="RAM —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color="#C7D2E3")
+        self.sys_ram.grid(row=0, column=1, sticky="ew", padx=(2, 0), pady=(0, 4))
+        self.sys_gpu = ctk.CTkLabel(self.system_monitor, text="GPU —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color="#C7D2E3")
+        self.sys_gpu.grid(row=1, column=0, sticky="ew", padx=(0, 2))
+        self.sys_vram = ctk.CTkLabel(self.system_monitor, text="VRAM —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color="#C7D2E3")
+        self.sys_vram.grid(row=1, column=1, sticky="ew", padx=(2, 0))
+        self.system_monitor.grid_columnconfigure((0,1), weight=1)
 
         workspace_card = ctk.CTkFrame(side, fg_color="transparent")
-        workspace_card.pack(fill="x", padx=18, pady=(22, 0))
-        ctk.CTkLabel(workspace_card, text="WORKSPACE", anchor="w", text_color=self.MUTED,
-                     font=ctk.CTkFont(size=10, weight="bold")).pack(fill="x")
-        self.workspace_label = ctk.CTkLabel(
-            workspace_card, text=str(self.tools.workspace), wraplength=220,
-            justify="left", anchor="w", text_color=self.TEXT,
-            font=ctk.CTkFont(size=12)
+        workspace_card.pack(fill="x", padx=14, pady=(0, 0))
+        ctk.CTkLabel(
+            workspace_card, text="พื้นที่ทำงาน", anchor="w", text_color=self.MUTED,
+            font=ctk.CTkFont(size=11)
+        ).pack(fill="x", pady=(0, 8))
+        self.workspace_button = ctk.CTkButton(
+            workspace_card, text="📁 " + str(self.tools.workspace), height=28, corner_radius=7,
+            fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color="#C7D2E3",
+            border_width=1, border_color=self.BORDER, anchor="w",
+            font=ctk.CTkFont(size=11), command=self._choose_workspace
         )
-        self.workspace_label.pack(fill="x", pady=(7, 9))
+        self.workspace_button.pack(fill="x", pady=(0, 6))
+
+        ws_actions = ctk.CTkFrame(workspace_card, fg_color="transparent")
+        ws_actions.pack(fill="x", pady=(0, 18))
         ctk.CTkButton(
-            workspace_card, text=self._t("change_folder"), height=36, corner_radius=18,
-            fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT,
-            command=self._choose_workspace
-        ).pack(fill="x")
+            ws_actions, text="☰ Explorer", height=26, corner_radius=6,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            border_width=1, border_color=self.BORDER,
+            font=ctk.CTkFont(size=11), command=self._open_project_explorer,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 3))
         ctk.CTkButton(
-            workspace_card, text=self._t("project_explorer"), height=34, corner_radius=18,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
-            command=self._open_project_explorer,
-        ).pack(fill="x", pady=(4, 0))
+            ws_actions, text="↶ ย้อนคืน", height=26, corner_radius=6,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            border_width=1, border_color=self.BORDER,
+            font=ctk.CTkFont(size=11), command=self._undo_files,
+        ).pack(side="right", fill="x", expand=True, padx=(3, 0))
 
         conversations = ctk.CTkFrame(side, fg_color="transparent")
-        conversations.pack(fill="both", expand=True, padx=18, pady=(18, 6))
+        conversations.pack(fill="both", expand=True, padx=14, pady=(0, 6))
         ctk.CTkLabel(
-            conversations, text=self._t("conversations"), anchor="w", text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=10, weight="bold")
-        ).pack(fill="x")
+            conversations, text="บทสนทนา", anchor="w", text_color=self.MUTED,
+            font=ctk.CTkFont(family=THAI_FONT, size=11)
+        ).pack(fill="x", pady=(0, 8))
         self.conversation_search_var = ctk.StringVar()
         search = ctk.CTkEntry(
             conversations, textvariable=self.conversation_search_var,
-            placeholder_text=self._t("search_conversations"), height=32,
+            placeholder_text="ค้นหาบทสนทนา…", height=28, corner_radius=7,
+            fg_color="transparent", border_width=1, border_color=self.BORDER, text_color=self.TEXT,
             font=ctk.CTkFont(family=THAI_FONT, size=11),
         )
-        search.pack(fill="x", pady=(6, 6))
+        search.pack(fill="x", pady=(0, 8))
         search.bind("<KeyRelease>", lambda _event: self._refresh_conversations())
         self.conversation_list = ctk.CTkScrollableFrame(
             conversations, fg_color="transparent", height=140,
@@ -1302,11 +1318,6 @@ class ChatApp(ctk.CTk):
         ctk.CTkButton(convo_actions, text=self._t("pin"), width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._pin_conversation).pack(side="left", padx=3)
         ctk.CTkButton(convo_actions, text=self._t("delete"), width=55, height=28, corner_radius=14, fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT, command=self._delete_conversation).pack(side="right")
         self._refresh_conversations()
-        ctk.CTkButton(
-            workspace_card, text=self._t("undo"), height=34, corner_radius=18,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
-            command=self._undo_files,
-        ).pack(fill="x", pady=(4, 0))
 
         main = ctk.CTkFrame(self, corner_radius=0, fg_color=self.BG)
         main.grid(row=0, column=1, sticky="nsew")
@@ -1317,32 +1328,43 @@ class ChatApp(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", padx=28)
         header.grid_propagate(False)
         title_box = ctk.CTkFrame(header, fg_color="transparent")
-        title_box.pack(side="left", pady=17)
+        title_box.pack(side="left", pady=14)
         ctk.CTkLabel(
-            title_box, text=self._t("your_assistant"), anchor="w", text_color=self.TEXT,
-            font=ctk.CTkFont(size=20, weight="bold")
+            title_box, text="ผู้ช่วยของคุณ", anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(size=15, weight="bold")
         ).pack(anchor="w")
         ctk.CTkLabel(
-            title_box, text=self._t("tagline"), anchor="w",
-            text_color=self.MUTED, font=ctk.CTkFont(size=12)
+            title_box, text="สนทนา • สร้างไฟล์ • ค้นหาข้อมูล", anchor="w",
+            text_color=self.MUTED, font=ctk.CTkFont(size=11)
         ).pack(anchor="w")
-        status_box = ctk.CTkFrame(header, fg_color=self.PANEL, corner_radius=14)
-        status_box.pack(side="right", pady=24)
+
+        status_container = ctk.CTkFrame(header, fg_color="transparent")
+        status_container.pack(side="right", pady=24)
+
+        status_box = ctk.CTkFrame(status_container, fg_color=self.PANEL, corner_radius=13, border_width=1, border_color=self.BORDER)
+        status_box.pack(side="left", padx=(0, 8))
         self.status_dot = ctk.CTkLabel(status_box, text="●", text_color=self.MUTED, font=ctk.CTkFont(size=11))
-        self.status_dot.pack(side="left", padx=(11, 5))
+        self.status_dot.pack(side="left", padx=(10, 5))
         self.status = ctk.CTkLabel(
-            status_box, text=self._t("model_off"), text_color=self.MUTED,
+            status_box, text=self._t("model_off"), text_color="#C7D2E3",
             font=ctk.CTkFont(size=11)
         )
-        self.status.pack(side="left", padx=(0, 11), pady=6)
+        self.status.pack(side="left", padx=(0, 4), pady=4)
+
+        self.model_toggle_btn = ctk.CTkButton(
+            status_box, text="⏻", width=22, height=22, corner_radius=11,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            font=ctk.CTkFont(size=12), command=self._toggle_model_server
+        )
+        self.model_toggle_btn.pack(side="left", padx=(0, 6), pady=2)
         self.context_button = ctk.CTkButton(
-            header, text="Context 0%", width=92, height=30, corner_radius=12,
+            status_container, text="Context 0%", width=80, height=26, corner_radius=13,
             fg_color="transparent", hover_color=self.PANEL_HOVER,
             border_width=1, border_color=self.BORDER, text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=10),
+            font=ctk.CTkFont(family=THAI_FONT, size=11),
             command=self._open_context_inspector,
         )
-        self.context_button.pack(side="right", padx=(0, 10), pady=24)
+        self.context_button.pack(side="left")
 
         self.chat = ctk.CTkScrollableFrame(
             main, fg_color="transparent", corner_radius=0,
@@ -1392,7 +1414,7 @@ class ChatApp(ctk.CTk):
         self.send_button.grid(row=0, column=1, padx=(0, 12), pady=12)
         self.stop_button = ctk.CTkButton(
             composer, text=self._t("stop"), width=94, height=48, corner_radius=8,
-            fg_color=("#EF4444", "#8D3D52"), hover_color=("#DC2626", "#A34860"),
+            fg_color="#8D3D52", hover_color="#A34860",
             font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold"),
             command=self._cancel_generation,
         )
@@ -1513,13 +1535,12 @@ class ChatApp(ctk.CTk):
         row.grid_columnconfigure(0, weight=1)
         bubble = ctk.CTkFrame(
             row,
-            fg_color=(("#FEF2F2", "#3B2430") if is_error else self.PANEL if is_system else self.USER_BUBBLE if is_user else self.BOT_BUBBLE),
+            fg_color=("#3B2430" if is_error else self.PANEL if is_system else self.USER_BUBBLE if is_user else self.BOT_BUBBLE),
             corner_radius=12,
-            border_width=1 if not is_user else 0,
-            border_color=("#FECACA", "#5C2B3B") if is_error else self.BORDER,
+            border_width=0,
         )
         bubble.grid(row=0, column=0, sticky="e" if is_user else "w", padx=(110, 0) if is_user else (0, 110))
-        label_color = ("#EF4444", "#FF9EAE") if is_error else ("#6366F1", "#C8BBFF") if not is_user else ("#4F46E5", "#E4DFFF")
+        label_color = "#FF9EAE" if is_error else "#B9A8FF" if not is_user else "#C7D2E3"
         ctk.CTkLabel(
             bubble, text=who.upper(), anchor="w", text_color=label_color,
             font=ctk.CTkFont(size=10, weight="bold")
@@ -1660,7 +1681,11 @@ class ChatApp(ctk.CTk):
                     if temps:
                         temperature = f"{int(temps[0].read_text()) / 1000:.0f}°C"
                     break
-            self.system_monitor.configure(text=f"CPU {cpu:.0f}% • RAM {used:.0f}%\nGPU {gpu_busy} • VRAM {vram} • {temperature}")
+            self.sys_cpu.configure(text=f"CPU {cpu:.0f}%")
+            self.sys_ram.configure(text=f"RAM {used:.0f}%")
+            self.sys_gpu.configure(text=f"GPU {gpu_busy}")
+            vram_display = vram.split('/')[0] + "G" if '/' in vram else vram
+            self.sys_vram.configure(text=f"VRAM {vram_display}")
         except Exception:
             pass
         if self.winfo_exists():
@@ -1855,7 +1880,7 @@ class ChatApp(ctk.CTk):
             self.mcp_manager.workspace = self.tools.workspace
             self.file_transaction = FileTransaction(self.tools.workspace, self.state_dir / "backups")
             self.changed_files.clear()
-            self.workspace_label.configure(text=str(self.tools.workspace))
+            self.workspace_button.configure(text="📁 " + str(self.tools.workspace))
 
     def _refresh_conversations(self) -> None:
         if not hasattr(self, "conversation_list"):
@@ -2175,6 +2200,12 @@ class ChatApp(ctk.CTk):
         self.model_status_var.set("ปิดโมเดลแล้ว")
         self.status.configure(text="โมเดลปิดอยู่", text_color=self.MUTED)
         self.status_dot.configure(text_color=self.MUTED)
+
+    def _toggle_model_server(self) -> None:
+        if self.model_manager.process:
+            self._stop_model()
+        else:
+            self._load_selected_model()
 
     def _download_selected_model(self) -> None:
         name = self.download_model_var.get()
@@ -2602,10 +2633,22 @@ class ChatApp(ctk.CTk):
         self._update_media_status()
 
     def _choose_image(self) -> None:
-        value = filedialog.askopenfilename(
-            parent=self, title=self._t("attach_image"),
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.gif"), ("All files", "*")],
-        )
+        zenity = shutil.which("zenity")
+        value = None
+        if zenity:
+            result = subprocess.run(
+                [zenity, "--file-selection", "--title", self._t("attach_image"),
+                 "--file-filter", "Images | *.png *.jpg *.jpeg *.webp *.gif",
+                 "--file-filter", "All files | *"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                value = result.stdout.strip()
+        else:
+            value = filedialog.askopenfilename(
+                parent=self, title=self._t("attach_image"),
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.gif"), ("All files", "*")],
+            )
         if value:
             try:
                 self._attach_media_path(Path(value))
