@@ -59,11 +59,31 @@ MODEL_CATALOG = {
         "qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf",
         "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
     ),
+    "Llama 3.1 8B Instruct — Q4_K_M": (
+        "llama-3.1-8b/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        "https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+    ),
+    "Gemma 2 9B IT — Q4_K_M": (
+        "gemma-2-9b/gemma-2-9b-it-Q4_K_M.gguf",
+        "https://huggingface.co/bartowski/gemma-2-9b-it-GGUF/resolve/main/gemma-2-9b-it-Q4_K_M.gguf",
+    ),
+    "Mistral Nemo 12B Instruct — Q4_K_M": (
+        "mistral-nemo-12b/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+        "https://huggingface.co/bartowski/Mistral-Nemo-Instruct-2407-GGUF/resolve/main/Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+    ),
+    "Phi-3 Mini 4K Instruct — Q4": (
+        "phi-3-mini/Phi-3-mini-4k-instruct-q4.gguf",
+        "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf",
+    ),
 }
 MODEL_DOWNLOAD_META = {
     "Qwen2.5 Coder 7B — Q4_K_M": (4683073536, "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c"),
     "Qwen3 8B — Q4_K_M": (5027783488, "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"),
     "Qwen3.5 4B — Q4_K_M": (2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
+    "Llama 3.1 8B Instruct — Q4_K_M": (4920739232, "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c"),
+    "Gemma 2 9B IT — Q4_K_M": (5761057728, "13b2a7b4115bbd0900162edcebe476da1ba1fc24e718e8b40d32f6e300f56dfe"),
+    "Mistral Nemo 12B Instruct — Q4_K_M": (7477208192, "7c1a10d202d8788dbe5628dc962254d10654c853cae6aaeca0618f05490d4a46"),
+    "Phi-3 Mini 4K Instruct — Q4": (2393231072, "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef"),
 }
 
 
@@ -789,10 +809,10 @@ class LocalModelManager:
         cancel_event: threading.Event | None = None,
     ) -> Path:
         relative, url = MODEL_CATALOG[catalog_name]
-        expected_size, expected_hash = MODEL_DOWNLOAD_META[catalog_name]
+        expected_size, expected_hash = MODEL_DOWNLOAD_META.get(catalog_name, (0, ""))
         target = self.root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.is_file() and target.stat().st_size == expected_size:
+        if target.is_file() and expected_size > 0 and target.stat().st_size == expected_size:
             return target
         distrobox = shutil.which("distrobox")
         if distrobox:
@@ -831,15 +851,20 @@ class LocalModelManager:
                     output.write(block)
                     downloaded += len(block)
                     if progress:
-                        progress(min(100, int(downloaded / expected_size * 100)))
-        if target.stat().st_size != expected_size:
+                        if expected_size > 0:
+                            progress(min(100, int(downloaded / expected_size * 100)))
+                        else:
+                            # Fake progress if size is unknown
+                            progress(min(99, int(downloaded / (1024 * 1024 * 100))))
+        if expected_size > 0 and target.stat().st_size != expected_size:
             raise RuntimeError("ขนาดไฟล์ที่ดาวน์โหลดไม่ถูกต้อง")
-        digest = hashlib.sha256()
-        with target.open("rb") as model_file:
-            for block in iter(lambda: model_file.read(8 * 1024 * 1024), b""):
-                digest.update(block)
-        if digest.hexdigest() != expected_hash:
-            raise RuntimeError("SHA-256 ของโมเดลไม่ถูกต้อง")
+        if expected_hash:
+            digest = hashlib.sha256()
+            with target.open("rb") as model_file:
+                for block in iter(lambda: model_file.read(8 * 1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest() != expected_hash:
+                raise RuntimeError("SHA-256 ของโมเดลไม่ถูกต้อง")
         if progress:
             progress(100)
         return target
@@ -858,17 +883,22 @@ class LocalModelManager:
 
 
 class ChatApp(ctk.CTk):
-    BG = "#0B0F19"
-    SIDEBAR = "#111827"
-    PANEL = "#151D2E"
-    PANEL_HOVER = "#1B263B"
-    BORDER = "#263349"
-    TEXT = "#F3F6FC"
-    MUTED = "#8FA1BC"
-    ACCENT = "#7C5CFC"
-    ACCENT_HOVER = "#6D4BEF"
-    USER_BUBBLE = "#5B46D8"
-    BOT_BUBBLE = "#172238"
+    BG = ("#FFFFFF", "#1E1E1E")
+    SIDEBAR = ("#F6F5F4", "#2A2A2A")
+    PANEL = ("#F6F5F4", "#383838")
+    PANEL_HOVER = ("#E5E5E5", "#4A4A4A")
+    BORDER = ("#E0E0E0", "#404040")
+    TEXT = ("#000000", "#FFFFFF")
+    MUTED = ("#77767B", "#9A9996")
+    ACCENT = ("#3584E4", "#3584E4")
+    ACCENT_HOVER = ("#1C71D8", "#1C71D8")
+    USER_BUBBLE = ("#E5E5E5", "#383838")
+    BOT_BUBBLE = ("#FFFFFF", "#2A2A2A")
+
+    def _resolve_color(self, color: tuple[str, str] | str) -> str:
+        if isinstance(color, tuple):
+            return color[0] if ctk.get_appearance_mode().lower() == "light" else color[1]
+        return color
 
     def __init__(self) -> None:
         super().__init__()
@@ -1022,7 +1052,7 @@ class ChatApp(ctk.CTk):
         brand = ctk.CTkFrame(side, fg_color="transparent")
         brand.pack(fill="x", padx=22, pady=(25, 22))
         ctk.CTkLabel(
-            brand, text="✦", width=42, height=42, corner_radius=13,
+            brand, text="✦", width=42, height=42, corner_radius=10,
             fg_color=self.ACCENT, text_color="white", font=ctk.CTkFont(size=22, weight="bold")
         ).pack(side="left")
         brand_text = ctk.CTkFrame(brand, fg_color="transparent")
@@ -1037,8 +1067,8 @@ class ChatApp(ctk.CTk):
         ).pack(anchor="w")
 
         ctk.CTkButton(
-            side, text="＋  บทสนทนาใหม่", height=42, corner_radius=12,
-            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            side, text="＋  บทสนทนาใหม่", height=42, corner_radius=21,
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=ctk.CTkFont(size=14, weight="bold"), command=self._clear
         ).pack(fill="x", padx=18, pady=(0, 16))
 
@@ -1049,9 +1079,8 @@ class ChatApp(ctk.CTk):
         sidebar_footer = ctk.CTkFrame(side, fg_color=self.SIDEBAR)
         sidebar_footer.pack(side="bottom", fill="x")
         self.settings_button = ctk.CTkButton(
-            sidebar_footer, text="⚙  ตั้งค่า", height=40, corner_radius=11,
-            fg_color="transparent", hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, text_color=self.MUTED,
+            sidebar_footer, text="⚙  ตั้งค่า", height=40, corner_radius=20,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             font=ctk.CTkFont(size=13, weight="bold"), command=self._open_settings
         )
         self.settings_button.pack(fill="x", padx=18, pady=(4, 2))
@@ -1072,15 +1101,15 @@ class ChatApp(ctk.CTk):
         )
         self.workspace_label.pack(fill="x", pady=(7, 9))
         ctk.CTkButton(
-            workspace_card, text="▣  เปลี่ยนโฟลเดอร์", height=36, corner_radius=9,
-            fg_color=self.PANEL, hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, command=self._choose_workspace
+            workspace_card, text="▣  เปลี่ยนโฟลเดอร์", height=36, corner_radius=18,
+            fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT,
+            command=self._choose_workspace
         ).pack(fill="x")
         ctk.CTkButton(
-            workspace_card, text="◫  Project Explorer", height=34, corner_radius=9,
-            fg_color="transparent", hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, command=self._open_project_explorer,
-        ).pack(fill="x", pady=(8, 0))
+            workspace_card, text="◫  Project Explorer", height=34, corner_radius=18,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
+            command=self._open_project_explorer,
+        ).pack(fill="x", pady=(4, 0))
 
         conversations = ctk.CTkFrame(side, fg_color="transparent")
         conversations.pack(fill="both", expand=True, padx=18, pady=(18, 6))
@@ -1103,15 +1132,15 @@ class ChatApp(ctk.CTk):
         self.conversation_list.pack(fill="both", expand=True)
         convo_actions = ctk.CTkFrame(conversations, fg_color="transparent")
         convo_actions.pack(fill="x", pady=(6, 0))
-        ctk.CTkButton(convo_actions, text="ส่งออก", width=75, height=28, command=self._export_conversation).pack(side="left", padx=(0, 3))
-        ctk.CTkButton(convo_actions, text="ปักหมุด", width=75, height=28, command=self._pin_conversation).pack(side="left", padx=3)
-        ctk.CTkButton(convo_actions, text="ลบ", width=55, height=28, fg_color="#713747", command=self._delete_conversation).pack(side="right")
+        ctk.CTkButton(convo_actions, text="ส่งออก", width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._export_conversation).pack(side="left", padx=(0, 3))
+        ctk.CTkButton(convo_actions, text="ปักหมุด", width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._pin_conversation).pack(side="left", padx=3)
+        ctk.CTkButton(convo_actions, text="ลบ", width=55, height=28, corner_radius=14, fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT, command=self._delete_conversation).pack(side="right")
         self._refresh_conversations()
         ctk.CTkButton(
-            workspace_card, text="↶  ย้อนคืนล่าสุด", height=34, corner_radius=9,
-            fg_color="transparent", hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, command=self._undo_files,
-        ).pack(fill="x", pady=(8, 0))
+            workspace_card, text="↶  ย้อนคืนล่าสุด", height=34, corner_radius=18,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
+            command=self._undo_files,
+        ).pack(fill="x", pady=(4, 0))
 
         main = ctk.CTkFrame(self, corner_radius=0, fg_color=self.BG)
         main.grid(row=0, column=1, sticky="nsew")
@@ -1157,7 +1186,7 @@ class ChatApp(ctk.CTk):
         self.chat.grid_columnconfigure(0, weight=1)
 
         composer = ctk.CTkFrame(
-            main, fg_color=self.PANEL, corner_radius=16,
+            main, fg_color=self.PANEL, corner_radius=12,
             border_width=1, border_color=self.BORDER
         )
         composer.grid(row=2, column=0, sticky="ew", padx=28, pady=(8, 24))
@@ -1170,14 +1199,14 @@ class ChatApp(ctk.CTk):
         self.input.bind("<Control-Return>", self._send_event)
         self._bind_edit_menu(self.input, readonly=False)
         self.send_button = ctk.CTkButton(
-            composer, text="ส่ง  ➜", width=94, height=48, corner_radius=12,
+            composer, text="ส่ง  ➜", width=94, height=48, corner_radius=8,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
             font=ctk.CTkFont(size=14, weight="bold"), command=self.send
         )
         self.send_button.grid(row=0, column=1, padx=(0, 12), pady=12)
         self.stop_button = ctk.CTkButton(
-            composer, text="หยุด ■", width=94, height=48, corner_radius=12,
-            fg_color="#8D3D52", hover_color="#A34860",
+            composer, text="หยุด ■", width=94, height=48, corner_radius=8,
+            fg_color=("#EF4444", "#8D3D52"), hover_color=("#DC2626", "#A34860"),
             font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold"),
             command=self._cancel_generation,
         )
@@ -1265,13 +1294,13 @@ class ChatApp(ctk.CTk):
         row.grid_columnconfigure(0, weight=1)
         bubble = ctk.CTkFrame(
             row,
-            fg_color=("#3B2430" if who == "ข้อผิดพลาด" else self.PANEL if is_system else self.USER_BUBBLE if is_user else self.BOT_BUBBLE),
-            corner_radius=16,
+            fg_color=(("#FEF2F2", "#3B2430") if who == "ข้อผิดพลาด" else self.PANEL if is_system else self.USER_BUBBLE if is_user else self.BOT_BUBBLE),
+            corner_radius=12,
             border_width=1 if not is_user else 0,
-            border_color="#5C2B3B" if who == "ข้อผิดพลาด" else self.BORDER,
+            border_color=("#FECACA", "#5C2B3B") if who == "ข้อผิดพลาด" else self.BORDER,
         )
         bubble.grid(row=0, column=0, sticky="e" if is_user else "w", padx=(110, 0) if is_user else (0, 110))
-        label_color = "#FF9EAE" if who == "ข้อผิดพลาด" else "#C8BBFF" if not is_user else "#E4DFFF"
+        label_color = ("#EF4444", "#FF9EAE") if who == "ข้อผิดพลาด" else ("#6366F1", "#C8BBFF") if not is_user else ("#4F46E5", "#E4DFFF")
         ctk.CTkLabel(
             bubble, text=who.upper(), anchor="w", text_color=label_color,
             font=ctk.CTkFont(size=10, weight="bold")
@@ -1284,11 +1313,15 @@ class ChatApp(ctk.CTk):
             border_width=0, text_color=self.TEXT,
             font=ctk.CTkFont(family=THAI_FONT, size=14),
         )
-        body.pack(fill="both", expand=True, padx=9, pady=(2, 2))
+        body.pack(fill="x", padx=9, pady=(2, 2))
         body.insert("1.0", text)
         self._highlight_markdown(body, text)
         body.configure(state="disabled")
         self._bind_edit_menu(body, readonly=True)
+        if is_system:
+            self.after_idle(lambda: self.chat._parent_canvas.yview_moveto(1.0))
+            return {"bubble": bubble, "body": body, "token_label": None}
+
         footer = ctk.CTkFrame(bubble, fg_color="transparent")
         footer.pack(fill="x", padx=15, pady=(0, 9))
         token_label = None
@@ -1336,7 +1369,7 @@ class ChatApp(ctk.CTk):
         if message_index is not None and not is_system:
             ctk.CTkButton(
                 footer, text="ลบ", width=42, height=26, corner_radius=8,
-                fg_color="transparent", hover_color="#713747", text_color=self.MUTED,
+                fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.MUTED,
                 command=lambda index=message_index: self._delete_message(index),
             ).pack(side="right", padx=4)
             if is_user:
@@ -1400,11 +1433,10 @@ class ChatApp(ctk.CTk):
             self.after(2000, self._update_system_monitor)
 
     def _apply_display_settings(self, value: Any = None) -> None:
-        # A CTkSlider passes its current numeric value to the callback. Apply
-        # both scaling domains: widget scaling alone leaves window-managed
-        # areas looking unchanged, which made the old control appear to affect
-        # only the conversation list.
-        scale = float(self.font_scale_var.get() if value is None else value)
+        if isinstance(value, str):
+            scale = float(self.font_scale_var.get())
+        else:
+            scale = float(self.font_scale_var.get() if value is None else value)
         scale = max(0.85, min(1.25, scale))
         self.font_scale_var.set(scale)
         self.ui_scale_label_var.set(f"{round(scale * 100):.0f}%")
@@ -1434,7 +1466,7 @@ class ChatApp(ctk.CTk):
         if not hasattr(self, "context_button"):
             return
         report = context_report(self.messages, 8192)
-        color = "#FF9EAE" if report["percent"] >= 85 else "#e5ad45" if report["percent"] >= 65 else self.MUTED
+        color = ("#EF4444", "#FF9EAE") if report["percent"] >= 85 else ("#F59E0B", "#e5ad45") if report["percent"] >= 65 else self.MUTED
         self.context_button.configure(text=f"Context {report['percent']:.0f}%", text_color=color)
 
     def _trim_context(self) -> None:
@@ -1551,7 +1583,7 @@ class ChatApp(ctk.CTk):
     def _cancel_generation(self) -> None:
         if self.busy:
             self.cancel_event.set()
-            self.status.configure(text="กำลังหยุด…", text_color="#FF9EAE")
+            self.status.configure(text="กำลังหยุด…", text_color=("#EF4444", "#FF9EAE"))
 
     def _on_close(self) -> None:
         self._save_preferences()
@@ -1561,7 +1593,17 @@ class ChatApp(ctk.CTk):
         self.destroy()
 
     def _choose_workspace(self) -> None:
-        selected = filedialog.askdirectory(initialdir=self.tools.workspace)
+        zenity = shutil.which("zenity")
+        selected = None
+        if zenity:
+            result = subprocess.run(
+                [zenity, "--file-selection", "--directory", "--title=เลือกโฟลเดอร์ Workspace", f"--filename={self.tools.workspace}/"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0:
+                selected = result.stdout.strip()
+        else:
+            selected = filedialog.askdirectory(initialdir=self.tools.workspace)
         if selected:
             self.tools.set_workspace(Path(selected))
             self.file_transaction = FileTransaction(self.tools.workspace, self.state_dir / "backups")
@@ -1581,9 +1623,9 @@ class ChatApp(ctk.CTk):
             prefix = "★ " if item.get("pinned") else ""
             ctk.CTkButton(
                 self.conversation_list, text=prefix + item.get("title", "บทสนทนา")[:28],
-                height=30, anchor="w",
+                height=30, corner_radius=15, anchor="w",
                 fg_color=self.PANEL_HOVER if item["id"] == active_id else "transparent",
-                hover_color=self.PANEL_HOVER,
+                hover_color=self.PANEL_HOVER, text_color=self.TEXT,
                 font=ctk.CTkFont(family=THAI_FONT, size=10),
                 command=lambda conversation_id=item["id"]: self._switch_conversation(conversation_id),
             ).pack(fill="x", pady=1)
@@ -1704,14 +1746,23 @@ class ChatApp(ctk.CTk):
         window.transient(self)
         toolbar = ctk.CTkFrame(window, fg_color="transparent")
         toolbar.pack(fill="x", padx=16, pady=(16, 8))
-        tree_frame = ctk.CTkFrame(window, fg_color=self.PANEL)
+        tree_frame = ctk.CTkFrame(window, fg_color=self.PANEL, corner_radius=12, border_width=1, border_color=self.BORDER)
         tree_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        tree = ttk.Treeview(tree_frame, columns=("kind",), show="tree")
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+
+        style = ttk.Style(window)
+        style.theme_use("default")
+        style.configure("Treeview",
+                        background=self._resolve_color(self.PANEL), foreground=self._resolve_color(self.TEXT),
+                        fieldbackground=self._resolve_color(self.PANEL), borderwidth=0,
+                        font=(THAI_FONT, 12))
+        style.map("Treeview", background=[("selected", self._resolve_color(self.PANEL_HOVER))], foreground=[("selected", self._resolve_color(self.TEXT))])
+
+        tree = ttk.Treeview(tree_frame, columns=("kind",), show="tree", style="Treeview")
+        scrollbar = ctk.CTkScrollbar(tree_frame, orientation="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
-        tree.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
-        scrollbar.pack(side="right", fill="y", padx=(0, 8), pady=8)
-        tree.tag_configure("changed", foreground="#A58BFF")
+        tree.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
+        scrollbar.pack(side="right", fill="y", padx=(4, 12), pady=12)
+        tree.tag_configure("changed", foreground="#C8BBFF")
 
         def refresh() -> None:
             tree.delete(*tree.get_children())
@@ -1771,7 +1822,12 @@ class ChatApp(ctk.CTk):
             ("Terminal", self._open_terminal),
             ("เปิด index.html", lambda: self._open_path(self.tools.workspace / "index.html")),
         ):
-            ctk.CTkButton(toolbar, text=label, width=110, command=command).pack(side="left", padx=4)
+            ctk.CTkButton(
+                toolbar, text=label, width=110, height=36, corner_radius=8,
+                fg_color=self.PANEL, hover_color=self.PANEL_HOVER,
+                border_width=1, border_color=self.BORDER, text_color=self.TEXT,
+                font=ctk.CTkFont(size=12, weight="bold"), command=command
+            ).pack(side="left", padx=4)
         context = Menu(window, tearoff=False)
         context.add_command(label="เปิด", command=open_selected)
         context.add_command(label="เปลี่ยนชื่อ", command=rename_selected)
@@ -1803,7 +1859,7 @@ class ChatApp(ctk.CTk):
             messagebox.showwarning("เลือกโมเดล", "กรุณาเลือกไฟล์โมเดลก่อน")
             return
         self.model_status_var.set("กำลังโหลดโมเดล…")
-        self.status.configure(text="กำลังโหลดโมเดล…", text_color="#e5ad45")
+        self.status.configure(text="กำลังโหลดโมเดล…", text_color=("#F59E0B", "#e5ad45"))
 
         def worker() -> None:
             try:
@@ -1953,23 +2009,24 @@ class ChatApp(ctk.CTk):
         model_buttons.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkButton(
             model_buttons, text="โหลดโมเดล", height=38, command=self._load_selected_model,
-            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold")
         ).pack(side="left", fill="x", expand=True, padx=(0, 5))
         ctk.CTkButton(
             model_buttons, text="ปิดโมเดล", height=38, command=self._stop_model,
-            fg_color="#713747", hover_color="#843F52",
+            fg_color=("#EF4444", "#8D3D52"), hover_color=("#DC2626", "#A34860"), text_color="#FFFFFF",
             font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold")
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
         utility_buttons = ctk.CTkFrame(card, fg_color="transparent")
         utility_buttons.pack(fill="x", padx=16, pady=(0, 10))
         ctk.CTkButton(
             utility_buttons, text="Benchmark", height=34, command=self._benchmark_model,
-            fg_color=self.PANEL_HOVER, hover_color=self.BORDER,
+            fg_color=self.PANEL_HOVER, hover_color=self.BORDER, text_color=self.TEXT,
         ).pack(side="left", fill="x", expand=True, padx=(0, 5))
         ctk.CTkButton(
             utility_buttons, text="ลบโมเดล", height=34, command=self._delete_selected_model,
-            fg_color="transparent", hover_color="#713747", border_width=1, border_color="#713747",
+            fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT,
+            border_width=1, border_color=("#FECACA", "#713747"),
         ).pack(side="left", fill="x", expand=True, padx=(5, 0))
         ctk.CTkLabel(
             card, textvariable=self.model_status_var, anchor="w", text_color="#64D6A2",
@@ -2022,7 +2079,7 @@ class ChatApp(ctk.CTk):
         ).pack(fill="x", padx=16, pady=(0, 9))
         ctk.CTkButton(
             download_card, text="ดาวน์โหลด", height=38, command=self._download_selected_model,
-            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER, text_color="#FFFFFF",
             font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold")
         ).pack(fill="x", padx=16, pady=(0, 16))
         self.download_progress = ctk.CTkProgressBar(
@@ -2032,8 +2089,8 @@ class ChatApp(ctk.CTk):
         self.download_progress.pack(fill="x", padx=16, pady=(0, 8))
         ctk.CTkButton(
             download_card, text="ยกเลิกดาวน์โหลด", height=32,
-            command=self._cancel_download, fg_color="transparent",
-            border_width=1, border_color=self.BORDER, text_color=self.MUTED,
+            command=self._cancel_download, fg_color="transparent", text_color=self.TEXT,
+            border_width=1, border_color=self.BORDER,
         ).pack(fill="x", padx=16, pady=(0, 16))
 
         display_card = ctk.CTkFrame(
@@ -2048,6 +2105,9 @@ class ChatApp(ctk.CTk):
         ctk.CTkSegmentedButton(
             display_card, values=["Dark", "Light", "System"],
             variable=self.appearance_var, command=self._apply_display_settings,
+            fg_color=self.BG, selected_color=self.ACCENT, selected_hover_color=self.ACCENT_HOVER,
+            unselected_color=self.BG, unselected_hover_color=self.PANEL_HOVER,
+            text_color=self.TEXT,
         ).pack(fill="x", padx=16, pady=(0, 12))
         scale_header = ctk.CTkFrame(display_card, fg_color="transparent")
         scale_header.pack(fill="x", padx=16)
@@ -2118,7 +2178,7 @@ class ChatApp(ctk.CTk):
         self.send_button.configure(state="disabled")
         self.send_button.grid_remove()
         self.stop_button.grid(row=0, column=1, padx=(0, 12), pady=12)
-        self.status.configure(text="กำลังคิด… งานใหญ่อาจใช้หลายนาที", text_color="#e5ad45")
+        self.status.configure(text="กำลังคิด… งานใหญ่อาจใช้หลายนาที", text_color=("#F59E0B", "#e5ad45"))
         api_url = self.api_url_var.get().strip()
         model = self.model_var.get().strip()
         multi_agent = bool(self.multi_agent_var.get())
@@ -2442,7 +2502,7 @@ class ChatApp(ctk.CTk):
                 messagebox.showerror("เกิดข้อผิดพลาด", text)
             elif kind == "model_loaded":
                 self.model_status_var.set(f"กำลังใช้งาน: {text}")
-                self.status.configure(text="โมเดลพร้อมใช้งาน", text_color="#63c174")
+                self.status.configure(text="โมเดลพร้อมใช้งาน", text_color=("#10B981", "#63c174"))
                 self.status_dot.configure(text_color="#43D19E")
             elif kind == "model_downloaded":
                 self.model_status_var.set(f"ดาวน์โหลดแล้ว: {Path(text).name}")
@@ -2463,7 +2523,7 @@ class ChatApp(ctk.CTk):
                 self.model_status_var.set(f"Router เลือก: {Path(text).name}")
             elif kind == "model_error":
                 self.model_status_var.set(str(text))
-                self.status.configure(text="โมเดลมีข้อผิดพลาด", text_color="#FF9EAE")
+                self.status.configure(text="โมเดลมีข้อผิดพลาด", text_color=("#EF4444", "#FF9EAE"))
                 messagebox.showerror("จัดการโมเดลไม่สำเร็จ", str(text))
             elif kind == "cancelled":
                 if self.stream_widgets:
@@ -2477,7 +2537,7 @@ class ChatApp(ctk.CTk):
                 self.send_button.configure(state="normal")
                 self.stop_button.grid_remove()
                 self.send_button.grid(row=0, column=1, padx=(0, 12), pady=12)
-                self.status.configure(text="พร้อมใช้งาน", text_color="#63c174")
+                self.status.configure(text="พร้อมใช้งาน", text_color=("#10B981", "#63c174"))
                 self._notify_finished()
         self.after(80, self._poll_events)
 

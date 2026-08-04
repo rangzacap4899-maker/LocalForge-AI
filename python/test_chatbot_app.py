@@ -23,6 +23,8 @@ except ImportError:
 
 from chatbot_app import (
     ChatApp,
+    MODEL_CATALOG,
+    MODEL_DOWNLOAD_META,
     ToolError,
     Tools,
     looks_like_broken_tool_call,
@@ -96,6 +98,12 @@ class ToolsTest(unittest.TestCase):
     def test_token_estimate_handles_thai_and_empty_text(self):
         self.assertEqual(estimate_tokens(""), 0)
         self.assertGreater(estimate_tokens("สวัสดีครับ"), 1)
+
+    def test_every_catalog_model_has_integrity_metadata(self):
+        self.assertEqual(set(MODEL_CATALOG), set(MODEL_DOWNLOAD_META))
+        for size, digest in MODEL_DOWNLOAD_META.values():
+            self.assertGreater(size, 0)
+            self.assertEqual(len(digest), 64)
 
     def test_parse_raw_file_block(self):
         self.assertEqual(
