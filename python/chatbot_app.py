@@ -60,6 +60,10 @@ DEFAULT_SERVER_BIN = str(APP_ROOT / "runtime/llama.cpp/build-vulkan/bin/llama-se
 DEFAULT_MODEL_ROOT = str(APP_ROOT / "models")
 
 MODEL_CATALOG = {
+    "Gemma 4 E4B IT — Q4_0": (
+        "gemma-4-e4b/gemma-4-E4B_q4_0-it.gguf",
+        "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B_q4_0-it.gguf",
+    ),
     "Qwen2.5 Coder 7B — Q4_K_M": (
         "qwen2.5-coder-7b/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
         "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
@@ -90,6 +94,7 @@ MODEL_CATALOG = {
     ),
 }
 MODEL_DOWNLOAD_META = {
+    "Gemma 4 E4B IT — Q4_0": (5154941280, "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee"),
     "Qwen2.5 Coder 7B — Q4_K_M": (4683073536, "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c"),
     "Qwen3 8B — Q4_K_M": (5027783488, "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"),
     "Qwen3.5 4B — Q4_K_M": (2740937888, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4"),
