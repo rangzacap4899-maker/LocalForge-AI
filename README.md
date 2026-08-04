@@ -21,6 +21,7 @@ LocalForge AI คือแอปเดสก์ท็อปสำหรับใ
 - UI รองรับไทย, English, 中文 และ日本語 พร้อมฟอนต์ตามภาษา
 - รองรับธีมมืด/สว่างและการปรับขนาด UI
 - แสดงสถานะ CPU, RAM, GPU, VRAM และอุณหภูมิ
+- เชื่อม local MCP servers ผ่าน stdio พร้อม Permission Center และ audit hooks
 
 ## ความต้องการของระบบ
 
@@ -113,12 +114,41 @@ cp packaging/localforge-ai.desktop ~/.local/share/applications/
 - โปรแกรมแสดง diff และรออนุมัติก่อนเขียนไฟล์
 - ไฟล์เดิมจะถูกสำรองเพื่อให้ย้อนคืนได้
 - ฟีเจอร์ค้นเว็บจะส่งคำค้นหรือ URL ไปยังบริการอินเทอร์เน็ตที่เกี่ยวข้อง
+- MCP tool ภายนอกใช้สิทธิ์ `Ask` เป็นค่าเริ่มต้นและต้องได้รับอนุมัติก่อนทำงาน
+- LocalForge ไม่รัน MCP command ผ่าน shell และจำกัดจำนวน tool schema ที่ส่งให้โมเดล
 
 ข้อมูลและ log ของโปรแกรมอยู่ที่:
 
 ```text
 ~/.local/state/localforge-ai/
 ```
+
+## MCP Servers และ Hooks
+
+เปิด **ตั้งค่า → MCP Servers & Hooks** เพื่อเพิ่ม local MCP server ที่สื่อสาร
+ผ่าน stdio โดยกรอกชื่อและคำสั่ง executable พร้อม arguments โดยตรง ห้ามใส่
+shell operator เช่น `|`, `&&` หรือ `>`
+
+สิทธิ์แต่ละ server:
+
+- `ask` — แสดงชื่อ tool และ arguments เพื่อขออนุมัติทุกครั้ง (ค่าเริ่มต้น)
+- `allow` — อนุญาตโดยไม่ถาม เหมาะเฉพาะ server ที่เชื่อถือได้
+- `deny` — ไม่เปิดเผย tools ของ server ให้โมเดล
+
+Hook engine ทำงานก่อนและหลัง model/tool calls เพื่อบันทึก audit, ปิดบัง token
+หรือ private key และจำกัดขนาดผลลัพธ์ เครื่องมือ MCP ถูกใส่ namespace เช่น
+`mcp__github__create_issue` และโปรแกรมจะเลือกส่งให้โมเดลสูงสุด 6 tools ที่เกี่ยวข้อง
+กับคำถาม เพื่อลด context และความสับสนของโมเดลขนาดเล็ก
+
+ไฟล์การตั้งค่าและ audit:
+
+```text
+~/.local/state/localforge-ai/mcp_servers.json
+~/.local/state/localforge-ai/audit.jsonl
+```
+
+> MCP server เป็นโปรแกรมที่ทำงานด้วยสิทธิ์เดียวกับผู้ใช้ โปรดติดตั้งและเปิดใช้
+> เฉพาะ server ที่ตรวจสอบแหล่งที่มาแล้ว
 
 ## ทดสอบ
 
@@ -142,6 +172,8 @@ LocalForge-AI/
 ├── python/
 │   ├── chatbot_app.py
 │   ├── localforge_core.py
+│   ├── localforge_hooks.py
+│   ├── localforge_mcp.py
 │   └── test_*.py
 ├── models/                 # สร้างภายในเครื่องและไม่เก็บใน Git
 └── runtime/llama.cpp/      # ติดตั้งภายในเครื่องและไม่เก็บใน Git

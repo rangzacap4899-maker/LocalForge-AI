@@ -40,6 +40,7 @@ cd ~/LocalForge-AI
 - Context Inspector พร้อม token meter, trim และ summary
 - Markdown highlighting, copy/code-copy, UI ไทย/English/中文/日本語, theme และ UI scaling
 - CPU/RAM/GPU/VRAM/temperature monitor และ desktop notification
+- MCP stdio client, per-server permission, lifecycle hooks และ audit log
 
 ## คีย์ลัด
 

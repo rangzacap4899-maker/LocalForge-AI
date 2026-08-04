@@ -37,6 +37,8 @@ from localforge_i18n import (
     LANGUAGE_NAMES,
     translate,
 )
+from localforge_hooks import HookEngine
+from localforge_mcp import MCPError, MCPManager, openai_tool_schema, select_tools
 
 
 USER_AGENT = "LocalForgeAI/1.0"
@@ -331,9 +333,13 @@ def needs_tools(text: str) -> bool:
 
 
 class GemmaClient:
-    def __init__(self, base_url: str, model: str):
+    def __init__(
+        self, base_url: str, model: str,
+        tool_schemas: list[dict[str, Any]] | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.tool_schemas = tool_schemas if tool_schemas is not None else OPENAI_TOOLS
         self.last_native_tool_call: dict[str, Any] | None = None
         self.last_native_message: dict[str, Any] | None = None
         self.last_completion_tokens = 0
@@ -427,7 +433,7 @@ class GemmaClient:
             "max_tokens": TOOL_MAX_TOKENS if enable_tools else CHAT_MAX_TOKENS,
         }
         if enable_tools:
-            payload["tools"] = OPENAI_TOOLS
+            payload["tools"] = self.tool_schemas
             payload["tool_choice"] = "auto"
         elif on_token:
             payload["stream"] = True
@@ -632,7 +638,7 @@ def looks_like_broken_tool_call(text: str) -> bool:
     """Detect intended calls that could not be parsed, without false matching prose."""
     return bool(
         re.search(r'["\']tool["\']\s*:', text, re.I)
-        and re.search(r"\b(list_files|read_file|write_file|web_search|fetch_url)\b", text)
+        and re.search(r"\b(list_files|read_file|write_file|web_search|fetch_url|mcp__[\w-]+__[\w.-]+)\b", text)
     )
 
 
@@ -954,6 +960,8 @@ class ChatApp(ctk.CTk):
             self.state_dir,
         )
         self.file_transaction = FileTransaction(self.tools.workspace, self.state_dir / "backups")
+        self.hooks = HookEngine(self.state_dir / "audit.jsonl", MAX_TOOL_RESULT_CHARS)
+        self.mcp_manager = MCPManager(self.state_dir / "mcp_servers.json", self.tools.workspace)
         self.changed_files: set[str] = set()
         self.messages: list[dict[str, Any]] = self._load_history()
         self.conversation_store = ConversationStore(self.state_dir / "conversations.json")
@@ -1622,6 +1630,7 @@ class ChatApp(ctk.CTk):
         self._save_preferences()
         self.cancel_event.set()
         self.download_cancel_event.set()
+        self.mcp_manager.close()
         self.model_manager.stop()
         self.destroy()
 
@@ -1639,6 +1648,8 @@ class ChatApp(ctk.CTk):
             selected = filedialog.askdirectory(initialdir=self.tools.workspace)
         if selected:
             self.tools.set_workspace(Path(selected))
+            self.mcp_manager.close()
+            self.mcp_manager.workspace = self.tools.workspace
             self.file_transaction = FileTransaction(self.tools.workspace, self.state_dir / "backups")
             self.changed_files.clear()
             self.workspace_label.configure(text=str(self.tools.workspace))
@@ -1705,6 +1716,54 @@ class ChatApp(ctk.CTk):
             if self.cancel_event.is_set():
                 return False
         return bool(request["approved"])
+
+    def _request_tool_approval(self, name: str, args: dict[str, Any]) -> bool:
+        request = {
+            "name": name, "args": args, "event": threading.Event(),
+            "approved": False, "always": False,
+        }
+        self.events.put(("tool_approval", request))
+        while not request["event"].wait(0.1):
+            if self.cancel_event.is_set():
+                return False
+        if request["approved"] and request["always"]:
+            match = re.match(r"mcp__([a-zA-Z0-9_-]+)__", name)
+            if match:
+                self.mcp_manager.update(match.group(1), permission="allow")
+        return bool(request["approved"])
+
+    def _show_tool_approval(self, request: dict[str, Any]) -> None:
+        window = ctk.CTkToplevel(self)
+        window.title(f"{self._t('tool_request')} — LocalForge AI")
+        window.geometry("680x500")
+        window.transient(self)
+        ctk.CTkLabel(
+            window, text=self._t("tool_request"),
+            font=ctk.CTkFont(family=THAI_FONT, size=20, weight="bold"),
+        ).pack(fill="x", padx=22, pady=(20, 5))
+        ctk.CTkLabel(
+            window, text=request["name"], anchor="w", text_color=self.ACCENT,
+            font=ctk.CTkFont(family="Noto Sans Mono", size=12, weight="bold"),
+        ).pack(fill="x", padx=22, pady=(0, 8))
+        preview = ctk.CTkTextbox(
+            window, wrap="word", font=ctk.CTkFont(family="Noto Sans Mono", size=12),
+            fg_color=self.BG, border_width=1, border_color=self.BORDER,
+        )
+        preview.pack(fill="both", expand=True, padx=22, pady=8)
+        preview.insert("1.0", json.dumps(request["args"], ensure_ascii=False, indent=2))
+        preview.configure(state="disabled")
+        buttons = ctk.CTkFrame(window, fg_color="transparent")
+        buttons.pack(fill="x", padx=22, pady=(6, 20))
+
+        def decide(approved: bool, always: bool = False) -> None:
+            request["approved"], request["always"] = approved, always
+            request["event"].set()
+            window.destroy()
+
+        ctk.CTkButton(buttons, text=self._t("deny"), command=lambda: decide(False), fg_color="#713747").pack(side="left")
+        ctk.CTkButton(buttons, text=self._t("allow_once"), command=lambda: decide(True), fg_color=self.PANEL_HOVER).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(buttons, text=self._t("allow_always"), command=lambda: decide(True, True), fg_color=self.ACCENT).pack(side="right")
+        window.protocol("WM_DELETE_WINDOW", lambda: decide(False))
 
     def _show_diff_review(self, request: dict[str, Any]) -> None:
         window = ctk.CTkToplevel(self)
@@ -1969,6 +2028,98 @@ class ChatApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _open_mcp_manager(self) -> None:
+        window = ctk.CTkToplevel(self)
+        window.title(f"{self._t('mcp_title')} — LocalForge AI")
+        window.geometry("760x680")
+        window.minsize(620, 540)
+        window.transient(self)
+        ctk.CTkLabel(
+            window, text=self._t("mcp_title"), anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(family=THAI_FONT, size=22, weight="bold"),
+        ).pack(fill="x", padx=24, pady=(22, 2))
+        ctk.CTkLabel(
+            window, text=self._t("audit_log", path=self.hooks.audit_path), anchor="w",
+            text_color=self.MUTED, font=ctk.CTkFont(family=THAI_FONT, size=10),
+        ).pack(fill="x", padx=24, pady=(0, 12))
+        status_var = ctk.StringVar(value="พร้อม")
+        status = ctk.CTkLabel(window, textvariable=status_var, anchor="w", text_color=self.MUTED)
+        status.pack(fill="x", padx=24, pady=(0, 8))
+        server_list = ctk.CTkScrollableFrame(window, fg_color="transparent", height=260)
+        server_list.pack(fill="both", expand=True, padx=24, pady=(0, 10))
+
+        def test_server(name: str) -> None:
+            status_var.set(f"กำลังเชื่อมต่อ {name}…")
+
+            def worker() -> None:
+                try:
+                    count = self.mcp_manager.test(name)
+                    self.events.put(("mcp_status", (status_var, f"{name}: พร้อม • {count} tools")))
+                except Exception as exc:
+                    self.events.put(("mcp_status", (status_var, f"{name}: {exc}")))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def refresh() -> None:
+            for child in server_list.winfo_children():
+                child.destroy()
+            if not self.mcp_manager.configs:
+                ctk.CTkLabel(server_list, text=self._t("no_mcp"), text_color=self.MUTED).pack(pady=20)
+                return
+            for config in self.mcp_manager.configs:
+                row = ctk.CTkFrame(server_list, fg_color=self.PANEL, corner_radius=10)
+                row.pack(fill="x", pady=4)
+                info = ctk.CTkFrame(row, fg_color="transparent")
+                info.pack(side="left", fill="x", expand=True, padx=12, pady=10)
+                ctk.CTkLabel(info, text=config.name, anchor="w", text_color=self.TEXT,
+                             font=ctk.CTkFont(size=12, weight="bold")).pack(fill="x")
+                ctk.CTkLabel(info, text=" ".join(config.command), anchor="w", text_color=self.MUTED,
+                             wraplength=360, font=ctk.CTkFont(family="Noto Sans Mono", size=9)).pack(fill="x")
+                permission_var = ctk.StringVar(value=config.permission)
+                ctk.CTkOptionMenu(
+                    row, variable=permission_var, values=["ask", "allow", "deny"], width=90,
+                    command=lambda value, name=config.name: self.mcp_manager.update(name, permission=value),
+                ).pack(side="left", padx=4)
+                enabled_var = ctk.BooleanVar(value=config.enabled)
+                ctk.CTkSwitch(
+                    row, text="", width=42, variable=enabled_var,
+                    command=lambda name=config.name, var=enabled_var: self.mcp_manager.update(name, enabled=var.get()),
+                ).pack(side="left", padx=4)
+                ctk.CTkButton(row, text="Test", width=52, command=lambda name=config.name: test_server(name)).pack(side="left", padx=4)
+                ctk.CTkButton(
+                    row, text="ลบ", width=46, fg_color="#713747",
+                    command=lambda name=config.name: (self.mcp_manager.remove(name), refresh()),
+                ).pack(side="left", padx=(4, 10))
+
+        refresh()
+        add_card = ctk.CTkFrame(window, fg_color=self.PANEL, corner_radius=12)
+        add_card.pack(fill="x", padx=24, pady=(0, 12))
+        ctk.CTkLabel(add_card, text=self._t("add_stdio"), anchor="w", text_color=self.TEXT,
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(fill="x", padx=14, pady=(12, 6))
+        inputs = ctk.CTkFrame(add_card, fg_color="transparent")
+        inputs.pack(fill="x", padx=14)
+        name_entry = ctk.CTkEntry(inputs, placeholder_text=self._t("server_name_hint"), width=170)
+        name_entry.pack(side="left", padx=(0, 8))
+        command_entry = ctk.CTkEntry(inputs, placeholder_text=self._t("command_hint"))
+        command_entry.pack(side="left", fill="x", expand=True)
+
+        def add_server() -> None:
+            try:
+                self.mcp_manager.add(name_entry.get(), command_entry.get(), "ask")
+                name_entry.delete(0, "end")
+                command_entry.delete(0, "end")
+                status_var.set("เพิ่ม server แล้ว • permission: ask")
+                refresh()
+            except Exception as exc:
+                messagebox.showerror("เพิ่ม MCP server ไม่สำเร็จ", str(exc), parent=window)
+
+        ctk.CTkButton(add_card, text=self._t("add_server"), command=add_server).pack(fill="x", padx=14, pady=(8, 12))
+        ctk.CTkLabel(
+            window,
+            text=self._t("mcp_warning"),
+            text_color=("#B45309", "#F5C16C"), font=ctk.CTkFont(family=THAI_FONT, size=10),
+        ).pack(fill="x", padx=24, pady=(0, 16))
+
     def _open_settings(self) -> None:
         if self.settings_window is not None and self.settings_window.winfo_exists():
             self.settings_window.focus()
@@ -2091,6 +2242,26 @@ class ChatApp(ctk.CTk):
             agent_row, text="", width=46, variable=self.multi_agent_var,
             progress_color=self.ACCENT, button_color="#FFFFFF"
         ).pack(side="right")
+        mcp_card = ctk.CTkFrame(
+            content, fg_color=self.PANEL, corner_radius=14,
+            border_width=1, border_color=self.BORDER,
+        )
+        mcp_card.pack(fill="x", padx=28, pady=(14, 0))
+        ctk.CTkLabel(
+            mcp_card, text=self._t("mcp_title"), anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold"),
+        ).pack(fill="x", padx=16, pady=(15, 2))
+        enabled_servers = sum(config.enabled for config in self.mcp_manager.configs)
+        ctk.CTkLabel(
+            mcp_card,
+            text=self._t("mcp_summary", enabled=enabled_servers, total=len(self.mcp_manager.configs)),
+            anchor="w", text_color=self.MUTED, font=ctk.CTkFont(family=THAI_FONT, size=10),
+        ).pack(fill="x", padx=16, pady=(0, 9))
+        ctk.CTkButton(
+            mcp_card, text=self._t("mcp_manage"), height=36,
+            command=self._open_mcp_manager, fg_color=self.PANEL_HOVER,
+            hover_color=self.BORDER, text_color=self.TEXT,
+        ).pack(fill="x", padx=16, pady=(0, 14))
         download_card = ctk.CTkFrame(
             content, fg_color=self.PANEL, corner_radius=14,
             border_width=1, border_color=self.BORDER
@@ -2385,8 +2556,14 @@ class ChatApp(ctk.CTk):
                     self.events.put(("tool", f"Router กำลังโหลด {desired.name}…"))
                     self.model_manager.load(desired, api_url)
                     self.events.put(("router_model", str(desired)))
-            client = GemmaClient(api_url, model)
-            if requests_action(original_request):
+            discovered_mcp = self.mcp_manager.discover()
+            selected_mcp = select_tools(discovered_mcp, original_request)
+            builtin_needed = needs_tools(original_request)
+            tool_schemas = (OPENAI_TOOLS if builtin_needed else []) + [
+                openai_tool_schema(tool) for tool in selected_mcp
+            ]
+            client = GemmaClient(api_url, model, tool_schemas)
+            if requests_action(original_request) and not selected_mcp:
                 recent_user_messages = select_recent_messages(
                     [m for m in self.messages if m["role"] == "user"], 3500
                 )
@@ -2432,12 +2609,17 @@ class ChatApp(ctk.CTk):
                 self.events.put(("answer", (final, client.last_completion_tokens, client.last_prompt_tokens)))
                 return
             action_nudge_used = False
-            enable_tools = needs_tools(original_request)
+            enable_tools = bool(tool_schemas)
             for _ in range(MAX_TOOL_ROUNDS):
+                recent_context = self._recent_context(self.messages)
+                self.hooks.before_model(
+                    len(recent_context),
+                    sum(estimate_tokens(str(item.get("content", ""))) for item in recent_context),
+                )
                 if not enable_tools:
                     self.events.put(("stream_begin", ""))
                 answer = client.generate(
-                    self._recent_context(self.messages), enable_tools,
+                    recent_context, enable_tools,
                     on_token=(lambda piece: self.events.put(("stream_delta", piece))) if not enable_tools else None,
                     cancel_event=self.cancel_event,
                 )
@@ -2474,14 +2656,32 @@ class ChatApp(ctk.CTk):
                     return
                 name, args = call
                 self.events.put(("tool", f"กำลังใช้ {name}: {json.dumps(args, ensure_ascii=False)}"))
+                source = "mcp" if name.startswith("mcp__") else "builtin"
+                started = time.monotonic()
                 try:
-                    if name == "write_file":
+                    if source == "mcp":
+                        server_name = name.split("__", 2)[1]
+                        permission = self.mcp_manager.get_config(server_name).permission
+                        decision = self.hooks.before_tool(name, args, source, permission)
+                        if not decision.allowed:
+                            result = f"ERROR: {decision.reason}"
+                        elif decision.require_approval and not self._request_tool_approval(name, args):
+                            result = "ERROR: ผู้ใช้ไม่อนุญาตให้เรียก MCP tool"
+                        else:
+                            result = self.mcp_manager.call(name, args)
+                    elif name == "write_file":
+                        self.hooks.before_tool(name, args, source, "allow")
                         path = str(args.get("path", ""))
                         content = str(args.get("content", ""))
                         result = "\n".join(self._apply_generated_files([(path, content)]))
                     else:
+                        self.hooks.before_tool(name, args, source, "allow")
                         result = self.tools.execute(name, args)
-                except ToolError as exc:
+                    result = self.hooks.after_tool(
+                        name, str(result), source, time.monotonic() - started
+                    )
+                except (ToolError, MCPError) as exc:
+                    self.hooks.on_error(f"tool:{name}", exc)
                     result = f"ERROR: {exc}"
                 if name == "write_file" and not result.startswith("ERROR:"):
                     path = str(args.get("path", "ไฟล์"))
@@ -2548,6 +2748,14 @@ class ChatApp(ctk.CTk):
                 self._update_context_meter()
             elif kind == "diff_request":
                 self._show_diff_review(text)
+            elif kind == "tool_approval":
+                self._show_tool_approval(text)
+            elif kind == "mcp_status":
+                status_var, value = text
+                try:
+                    status_var.set(value)
+                except Exception:
+                    pass
             elif kind == "tool":
                 self.status.configure(text=text[:38] + ("…" if len(text) > 38 else ""))
             elif kind == "error":
