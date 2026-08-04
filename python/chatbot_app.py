@@ -48,6 +48,11 @@ MAX_FILE_BYTES = 1_000_000
 MAX_WEB_BYTES = 1_500_000
 MAX_TOOL_ROUNDS = 12
 API_TIMEOUT_SECONDS = 900
+# Image/audio preprocessing can keep a streaming connection silent for several
+# seconds before the first token. Five seconds was enough for text but caused
+# false timeouts on real photos; retain a finite timeout so cancellation and
+# dead-server detection still return control to the UI.
+STREAM_IDLE_TIMEOUT_SECONDS = 60
 MAX_TOOL_RESULT_CHARS = 12_000
 MODEL_CONTEXT_TOKENS = 8192
 PROMPT_TOKEN_BUDGET = 5000
@@ -438,16 +443,18 @@ class GemmaClient:
         parts: list[str] = []
         with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
             try:
-                response.fp.raw._sock.settimeout(5)  # type: ignore[attr-defined]
+                response.fp.raw._sock.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
             except AttributeError:
                 pass
             while True:
                 try:
                     raw_line = response.readline()
-                except (TimeoutError, OSError):
+                except (TimeoutError, OSError) as exc:
                     if parts:
                         break
-                    raise
+                    raise RuntimeError(
+                        f"โมเดลยังไม่เริ่มตอบภายใน {STREAM_IDLE_TIMEOUT_SECONDS} วินาที"
+                    ) from exc
                 if not raw_line:
                     break
                 if cancel_event and cancel_event.is_set():
