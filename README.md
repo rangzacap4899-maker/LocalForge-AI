@@ -36,7 +36,8 @@ LocalForge AI คือแอปเดสก์ท็อปสำหรับใ
 
 เมนูดาวน์โหลดรองรับ Gemma 4 E4B IT Q4_0 รุ่นทางการ (ไฟล์ประมาณ 5.15 GB)
 เมื่อเลือก Gemma 4 E4B แอปจะใช้โปรไฟล์สำหรับการ์ดจอ VRAM 8 GB โดยอัตโนมัติ:
-offload ทุก layer ไปยัง GPU, context 8,192 tokens, KV cache Q8 และจำกัด CPU ที่ 12 threads
+offload ทุก layer ไปยัง GPU, context 8,192 tokens, KV cache Q8, multimodal batch 2,048
+และจำกัด CPU ที่ 12 threads
 เพื่อให้ตอบสนองไวและไม่ใช้หน่วยความจำเกินจำเป็น
 
 Gemma 4 E4B รองรับภาพและเสียงใน LocalForge เมื่อมีไฟล์ `gemma-4-E4B-it-mmproj.gguf`

@@ -159,7 +159,13 @@ def inference_profile(model_path: Path, cpu_count: int | None = None) -> dict[st
         # Q4_0 weights plus an 8K Q8 KV cache fit comfortably in this
         # workstation's 8 GiB GPU. Explicit all-layer offload avoids a future
         # llama.cpp heuristic change silently moving work back to the CPU.
-        profile.update(name="Gemma 4 E4B · RX 8GB", gpu_layers="all")
+        # Vision/audio encoders use non-causal attention. Their complete media
+        # token block must fit in one ubatch or llama.cpp aborts while decoding
+        # larger pasted images (GGML_ASSERT in llama-context.cpp).
+        profile.update(
+            name="Gemma 4 E4B · RX 8GB", gpu_layers="all",
+            batch=2048, ubatch=2048,
+        )
     return profile
 
 
@@ -2962,7 +2968,16 @@ class ChatApp(ctk.CTk):
         except GenerationCancelled:
             self.events.put(("cancelled", "หยุดสร้างคำตอบแล้ว"))
         except Exception as exc:  # surfaced in the GUI, including connectivity errors
-            self.events.put(("error", str(exc)))
+            process = self.model_manager.process
+            if isinstance(exc, urllib.error.URLError) and process and process.poll() is not None:
+                self.model_manager.stop()
+                self.events.put((
+                    "model_crashed",
+                    "เซิร์ฟเวอร์โมเดลหยุดทำงานขณะประมวลผลสื่อ "
+                    "กรุณากดโหลดโมเดลใหม่แล้วส่งอีกครั้ง",
+                ))
+            else:
+                self.events.put(("error", str(exc)))
         finally:
             self.events.put(("done", ""))
 
@@ -3008,6 +3023,12 @@ class ChatApp(ctk.CTk):
             elif kind == "error":
                 self._append(self._t("error"), text)
                 messagebox.showerror("เกิดข้อผิดพลาด", text)
+            elif kind == "model_crashed":
+                self.model_status_var.set("โมเดลหยุดทำงาน — กรุณาโหลดใหม่")
+                self.status.configure(text="โมเดลหยุดทำงาน", text_color=("#EF4444", "#FF9EAE"))
+                self.status_dot.configure(text_color="#EF4444")
+                self._append(self._t("error"), text)
+                messagebox.showerror(self._t("error"), text)
             elif kind == "model_loaded":
                 model_name, profile_text = text
                 self.model_status_var.set(f"กำลังใช้งาน: {model_name}\n{profile_text}")

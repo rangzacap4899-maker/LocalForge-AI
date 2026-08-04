@@ -115,6 +115,8 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(profile["threads"], 12)
         self.assertEqual(profile["context"], 8192)
         self.assertEqual(profile["cache_type"], "q8_0")
+        self.assertEqual(profile["batch"], 2048)
+        self.assertEqual(profile["ubatch"], 2048)
 
     def test_generic_profile_keeps_auto_offload(self):
         profile = inference_profile(Path("another-model.gguf"), cpu_count=8)
