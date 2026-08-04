@@ -19,6 +19,7 @@ import webbrowser
 import urllib.error
 import urllib.parse
 import urllib.request
+import tkinter as tk
 from pathlib import Path
 from tkinter import Menu, filedialog, messagebox, simpledialog, ttk
 from typing import Any
@@ -1114,6 +1115,7 @@ class ChatApp(ctk.CTk):
         self.request_started = 0.0
         self.stream_buffer = ""
         self.stream_widgets: dict[str, Any] | None = None
+        self.chat_images: list[tk.PhotoImage] = []
         self.pending_media: list[tuple[Path, dict[str, Any]]] = []
         self.recording_process: subprocess.Popen[Any] | None = None
         self.recording_path: Path | None = None
@@ -1163,7 +1165,10 @@ class ChatApp(ctk.CTk):
             messages = data.get("messages", [])
             if isinstance(messages, list):
                 return [
-                    {"role": m["role"], "content": m["content"]}
+                    {
+                        "role": m["role"], "content": m["content"],
+                        **({"media_paths": m["media_paths"]} if isinstance(m.get("media_paths"), list) else {}),
+                    }
                     for m in messages
                     if isinstance(m, dict)
                     and m.get("role") in {"user", "assistant"}
@@ -1175,7 +1180,10 @@ class ChatApp(ctk.CTk):
 
     def _save_history(self) -> None:
         saved = [
-            {"role": m["role"], "content": m["content"]}
+            {
+                "role": m["role"], "content": m["content"],
+                **({"media_paths": m["media_paths"]} if isinstance(m.get("media_paths"), list) else {}),
+            }
             for m in self.messages
             if m.get("role") in {"user", "assistant"}
             and isinstance(m.get("content"), str)
@@ -1390,7 +1398,11 @@ class ChatApp(ctk.CTk):
         )
         if self.messages:
             for index, message in enumerate(self.messages):
-                self._append(self._t("you") if message["role"] == "user" else "LocalForge", message["content"], message_index=index)
+                self._append(
+                    self._t("you") if message["role"] == "user" else "LocalForge",
+                    message["content"], message_index=index,
+                    media_paths=message.get("media_paths"),
+                )
         else:
             self._append(self._t("system"), self._t("ready"))
         self._update_context_meter()
@@ -1461,9 +1473,34 @@ class ChatApp(ctk.CTk):
             button.configure(text=self._t("copied"))
             self.after(1200, lambda: button.winfo_exists() and button.configure(text=self._t("copy")))
 
+    def _chat_thumbnail(self, path: Path) -> tk.PhotoImage | None:
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"} or not path.is_file():
+            return None
+        try:
+            identity = f"{path.resolve()}:{path.stat().st_mtime_ns}:{path.stat().st_size}"
+            digest = hashlib.sha256(identity.encode()).hexdigest()[:20]
+            directory = self.state_dir / "thumbnails"
+            directory.mkdir(parents=True, exist_ok=True)
+            thumbnail = directory / f"{digest}.png"
+            if not thumbnail.is_file():
+                converter = shutil.which("magick") or shutil.which("convert")
+                if not converter:
+                    return None
+                command = [
+                    converter, str(path), "-auto-orient", "-thumbnail", "520x300>",
+                    "-strip", str(thumbnail),
+                ]
+                result = subprocess.run(command, capture_output=True, timeout=20)
+                if result.returncode != 0:
+                    return None
+            return tk.PhotoImage(file=str(thumbnail))
+        except (OSError, subprocess.SubprocessError, tk.TclError):
+            return None
+
     def _append(
         self, who: str, text: str, token_count: int | None = None,
         metrics: dict[str, Any] | None = None, message_index: int | None = None,
+        media_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         user_labels = {translate(code, "you") for code in LANGUAGE_NAMES}
         system_labels = {translate(code, "system") for code in LANGUAGE_NAMES}
@@ -1487,6 +1524,14 @@ class ChatApp(ctk.CTk):
             bubble, text=who.upper(), anchor="w", text_color=label_color,
             font=ctk.CTkFont(size=10, weight="bold")
         ).pack(fill="x", padx=15, pady=(11, 2))
+        for media_path in media_paths or []:
+            thumbnail = self._chat_thumbnail(Path(media_path))
+            if thumbnail is not None:
+                self.chat_images.append(thumbnail)
+                ctk.CTkLabel(
+                    bubble, text="", image=thumbnail, corner_radius=10,
+                    fg_color="transparent",
+                ).pack(padx=15, pady=(6, 4))
         line_count = min(18, max(1, text.count("\n") + (len(text) // 78) + 1))
         bubble_width = max(360, min(650, self.winfo_width() - 500))
         body = ctk.CTkTextbox(
@@ -1648,10 +1693,12 @@ class ChatApp(ctk.CTk):
     def _render_messages(self) -> None:
         for child in self.chat.winfo_children():
             child.destroy()
+        self.chat_images.clear()
         for index, message in enumerate(self.messages):
             self._append(
                 self._t("you") if message.get("role") == "user" else "LocalForge",
                 str(message.get("content", "")), message_index=index,
+                media_paths=message.get("media_paths"),
             )
         self._update_context_meter()
 
@@ -2646,8 +2693,9 @@ class ChatApp(ctk.CTk):
             return
         self.input.delete("1.0", "end")
         media_note = "" if not media else f"\n📎 แนบสื่อ {len(media)} ไฟล์"
-        self._append(self._t("you"), text + media_note)
-        self.messages.append({"role": "user", "content": text})
+        media_paths = [str(path) for path, _part in self.pending_media]
+        self._append(self._t("you"), text + media_note, media_paths=media_paths)
+        self.messages.append({"role": "user", "content": text, "media_paths": media_paths})
         self.pending_media = []
         self._update_media_status()
         self._save_history()
