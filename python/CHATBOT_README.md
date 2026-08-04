@@ -42,6 +42,8 @@ cd ~/LocalForge-AI
 - CPU/RAM/GPU/VRAM/temperature monitor และ desktop notification
 - โปรไฟล์ Gemma 4 E4B สำหรับ GPU 8 GB: GPU offload ทุก layer, context 8K,
   KV cache Q8 และสูงสุด 12 CPU threads (แสดงชื่อโปรไฟล์หลังโหลดโมเดล)
+- สนทนา multimodal ด้วย Gemma 4: เลือกภาพ, วางภาพด้วย `Ctrl+Shift+V` และอัดเสียง
+  16 kHz mono ผ่าน PipeWire โดยโหลด official mmproj อัตโนมัติ
 - MCP stdio client, per-server permission, lifecycle hooks และ audit log
 
 ## คีย์ลัด

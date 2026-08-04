@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import html
 import hashlib
+import base64
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -103,6 +105,41 @@ MODEL_DOWNLOAD_META = {
     "Mistral Nemo 12B Instruct — Q4_K_M": (7477208192, "7c1a10d202d8788dbe5628dc962254d10654c853cae6aaeca0618f05490d4a46"),
     "Phi-3 Mini 4K Instruct — Q4": (2393231072, "8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef"),
 }
+MODEL_COMPANIONS = {
+    "Gemma 4 E4B IT — Q4_0": (
+        "gemma-4-e4b/gemma-4-E4B-it-mmproj.gguf",
+        "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/main/gemma-4-E4B-it-mmproj.gguf",
+        991552256,
+        "7498a37cb619e55f2fcf87eb931f56e99389ed6d432e4c5c66110694c0d65578",
+    ),
+}
+
+
+def media_content(path: Path) -> dict[str, Any]:
+    """Create an OpenAI-compatible multimodal content part from a local file."""
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    if mime.startswith("image/"):
+        return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+    if mime.startswith("audio/") or path.suffix.lower() == ".wav":
+        audio_format = path.suffix.lower().lstrip(".") or "wav"
+        return {"type": "input_audio", "input_audio": {"data": encoded, "format": audio_format}}
+    raise ValueError(f"ไม่รองรับไฟล์สื่อชนิดนี้: {path.name}")
+
+
+def with_media(messages: list[dict[str, Any]], media: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach media to the latest user turn without mutating saved history."""
+    result = [dict(message) for message in messages]
+    if not media:
+        return result
+    for index in range(len(result) - 1, -1, -1):
+        if result[index].get("role") == "user":
+            text = str(result[index].get("content", ""))
+            images = [part for part in media if part.get("type") == "image_url"]
+            audio = [part for part in media if part.get("type") == "input_audio"]
+            result[index]["content"] = [*images, {"type": "text", "text": text}, *audio]
+            break
+    return result
 
 
 def inference_profile(model_path: Path, cpu_count: int | None = None) -> dict[str, Any]:
@@ -840,6 +877,9 @@ class LocalModelManager:
             "--ctx-size", str(profile["context"]),
             "--parallel", "1", "--no-cont-batching", "--port", str(port),
         ]
+        mmproj = model_path.with_name("gemma-4-E4B-it-mmproj.gguf")
+        if "gemma-4-e4b" in model_path.name.lower() and mmproj.is_file():
+            command[3:3] = ["--mmproj", str(mmproj)]
         environment = os.environ.copy()
         library_dir = str(self.server_bin.parent)
         current_library_path = environment.get("LD_LIBRARY_PATH", "")
@@ -871,6 +911,7 @@ class LocalModelManager:
         target = self.root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.is_file() and expected_size > 0 and target.stat().st_size == expected_size:
+            self._download_companion(catalog_name, progress, cancel_event)
             return target
         distrobox = shutil.which("distrobox")
         if distrobox:
@@ -925,6 +966,44 @@ class LocalModelManager:
                 raise RuntimeError("SHA-256 ของโมเดลไม่ถูกต้อง")
         if progress:
             progress(100)
+        self._download_companion(catalog_name, progress, cancel_event)
+        return target
+
+    def _download_companion(
+        self, catalog_name: str, progress: Any | None,
+        cancel_event: threading.Event | None,
+    ) -> Path | None:
+        companion = MODEL_COMPANIONS.get(catalog_name)
+        if not companion:
+            return None
+        relative, url, expected_size, expected_hash = companion
+        target = self.root / relative
+        if target.is_file() and target.stat().st_size == expected_size:
+            return target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_suffix(target.suffix + ".part")
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response, partial.open("wb") as output:
+            received = 0
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    raise GenerationCancelled("ยกเลิกการดาวน์โหลดแล้ว")
+                block = response.read(4 * 1024 * 1024)
+                if not block:
+                    break
+                output.write(block)
+                received += len(block)
+                if progress:
+                    progress(min(99, round(received * 100 / expected_size)))
+        if partial.stat().st_size != expected_size:
+            raise RuntimeError("ขนาดไฟล์ multimodal projector ไม่ถูกต้อง")
+        digest = hashlib.sha256()
+        with partial.open("rb") as model_file:
+            for block in iter(lambda: model_file.read(8 * 1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != expected_hash:
+            raise RuntimeError("SHA-256 ของ multimodal projector ไม่ถูกต้อง")
+        partial.replace(target)
         return target
 
     def delete(self, model_path: Path) -> None:
@@ -1022,6 +1101,10 @@ class ChatApp(ctk.CTk):
         self.request_started = 0.0
         self.stream_buffer = ""
         self.stream_widgets: dict[str, Any] | None = None
+        self.pending_media: list[tuple[Path, dict[str, Any]]] = []
+        self.recording_process: subprocess.Popen[Any] | None = None
+        self.recording_path: Path | None = None
+        self.speech_process: subprocess.Popen[Any] | None = None
         self.diff_request: dict[str, Any] | None = None
         self._compact_layout: bool | None = None
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1259,7 +1342,27 @@ class ChatApp(ctk.CTk):
         )
         self.input.grid(row=0, column=0, sticky="ew", padx=(14, 8), pady=8)
         self.input.bind("<Control-Return>", self._send_event)
+        self.input.bind("<Control-Shift-V>", self._paste_image_event)
         self._bind_edit_menu(self.input, readonly=False)
+        media_bar = ctk.CTkFrame(composer, fg_color="transparent")
+        media_bar.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+        self.attach_button = ctk.CTkButton(
+            media_bar, text=self._t("attach_image"), width=104, height=28,
+            fg_color="transparent", hover_color=self.PANEL_HOVER,
+            border_width=1, border_color=self.BORDER, command=self._choose_image,
+        )
+        self.attach_button.pack(side="left", padx=(0, 6))
+        self.voice_button = ctk.CTkButton(
+            media_bar, text=self._t("voice"), width=92, height=28,
+            fg_color="transparent", hover_color=self.PANEL_HOVER,
+            border_width=1, border_color=self.BORDER, command=self._toggle_recording,
+        )
+        self.voice_button.pack(side="left", padx=(0, 8))
+        self.media_status = ctk.CTkLabel(
+            media_bar, text="", text_color=self.MUTED,
+            font=ctk.CTkFont(family=THAI_FONT, size=10),
+        )
+        self.media_status.pack(side="left")
         self.send_button = ctk.CTkButton(
             composer, text=self._t("send"), width=94, height=48, corner_radius=8,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
@@ -1417,6 +1520,13 @@ class ChatApp(ctk.CTk):
             )
             copy_button.configure(command=lambda value=text, btn=copy_button: self._copy_text(value, btn))
             copy_button.pack(side="right")
+            ctk.CTkButton(
+                footer, text=self._t("speak"), width=74, height=26, corner_radius=8,
+                fg_color="transparent", hover_color=self.PANEL_HOVER,
+                border_width=1, border_color=self.BORDER, text_color=self.MUTED,
+                font=ctk.CTkFont(family=THAI_FONT, size=10),
+                command=lambda value=text: self._speak_text(value),
+            ).pack(side="right", padx=(0, 6))
             code_blocks = re.findall(r"```(?:[\w.+-]+)?\n(.*?)```", text, re.S)
             for block_index, code in enumerate(code_blocks[:2], 1):
                 ctk.CTkButton(
@@ -1659,6 +1769,10 @@ class ChatApp(ctk.CTk):
         self._save_preferences()
         self.cancel_event.set()
         self.download_cancel_event.set()
+        if self.recording_process and self.recording_process.poll() is None:
+            self.recording_process.terminate()
+        if self.speech_process and self.speech_process.poll() is None:
+            self.speech_process.terminate()
         self.mcp_manager.close()
         self.model_manager.stop()
         self.destroy()
@@ -2413,18 +2527,116 @@ class ChatApp(ctk.CTk):
         self.send()
         return "break"
 
+    def _update_media_status(self) -> None:
+        names = [path.name for path, _part in self.pending_media]
+        self.media_status.configure(text=" • ".join(names[-2:]))
+
+    def _attach_media_path(self, path: Path) -> None:
+        path = path.expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"ไม่พบไฟล์: {path}")
+        if path.stat().st_size > 25 * 1024 * 1024:
+            raise RuntimeError("ไฟล์สื่อต้องมีขนาดไม่เกิน 25 MB")
+        part = media_content(path)
+        self.pending_media.append((path, part))
+        self._update_media_status()
+
+    def _choose_image(self) -> None:
+        value = filedialog.askopenfilename(
+            parent=self, title=self._t("attach_image"),
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.gif"), ("All files", "*")],
+        )
+        if value:
+            try:
+                self._attach_media_path(Path(value))
+            except Exception as exc:
+                messagebox.showerror(self._t("error"), str(exc))
+
+    def _paste_image_event(self, _event: Any = None) -> str:
+        wl_paste = shutil.which("wl-paste")
+        if not wl_paste:
+            messagebox.showwarning(self._t("paste"), "ไม่พบ wl-paste สำหรับอ่านภาพจากคลิปบอร์ด")
+            return "break"
+        try:
+            types = subprocess.run(
+                [wl_paste, "--list-types"], capture_output=True, text=True, timeout=3, check=True,
+            ).stdout.splitlines()
+            mime = next((value for value in types if value in {"image/png", "image/jpeg", "image/webp"}), None)
+            if not mime:
+                raise RuntimeError("คลิปบอร์ดไม่มีภาพ ใช้ Ctrl+V เพื่อวางข้อความตามปกติ")
+            suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            path = self.state_dir / f"clipboard-{int(time.time() * 1000)}{suffix}"
+            image_data = subprocess.run(
+                [wl_paste, "--no-newline", "--type", mime],
+                capture_output=True, timeout=8, check=True,
+            ).stdout
+            path.write_bytes(image_data)
+            self._attach_media_path(path)
+        except Exception as exc:
+            messagebox.showerror(self._t("paste"), str(exc))
+        return "break"
+
+    def _toggle_recording(self) -> None:
+        if self.recording_process and self.recording_process.poll() is None:
+            self.recording_process.terminate()
+            try:
+                self.recording_process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.recording_process.kill()
+            self.recording_process = None
+            self.voice_button.configure(text=self._t("voice"), fg_color="transparent")
+            if self.recording_path and self.recording_path.is_file() and self.recording_path.stat().st_size > 44:
+                try:
+                    self._attach_media_path(self.recording_path)
+                except Exception as exc:
+                    messagebox.showerror(self._t("error"), str(exc))
+            return
+        recorder = shutil.which("pw-record")
+        if not recorder:
+            messagebox.showerror(self._t("voice"), "ไม่พบ pw-record (PipeWire)")
+            return
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.recording_path = self.state_dir / f"voice-{int(time.time() * 1000)}.wav"
+        self.recording_process = subprocess.Popen(
+            [recorder, "--format=s16", "--rate=16000", "--channels=1", str(self.recording_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.voice_button.configure(text=self._t("stop_recording"), fg_color=("#EF4444", "#8D3D52"))
+        self.media_status.configure(text=self._t("recording"))
+
+    def _speak_text(self, text: str) -> None:
+        if self.speech_process and self.speech_process.poll() is None:
+            self.speech_process.terminate()
+            self.speech_process = None
+            return
+        speaker = shutil.which("spd-say") or shutil.which("espeak-ng") or shutil.which("espeak")
+        if not speaker:
+            messagebox.showerror(self._t("speak"), "ไม่พบ speech-dispatcher หรือ eSpeak")
+            return
+        clean = re.sub(r"```.*?```", " ", text, flags=re.S)
+        clean = re.sub(r"[*_#`]+", "", clean).strip()[:4000]
+        args = [speaker, "-l", self.language_var.get(), clean] if Path(speaker).name == "spd-say" else [speaker, "-v", self.language_var.get(), clean]
+        self.speech_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def send(self) -> None:
         text = self.input.get("1.0", "end").strip()
-        if not text or self.busy:
+        if self.busy or (not text and not self.pending_media):
             return
+        media = [part for _path, part in self.pending_media]
+        if not text and media:
+            text = "ถอดเสียงและตอบข้อความนี้" if any(part["type"] == "input_audio" for part in media) else "อธิบายภาพนี้"
         if context_report(self.messages, MODEL_CONTEXT_TOKENS)["percent"] >= 85:
             self._summarize_context()
         if not self.auto_router_var.get() and not self.model_manager._health(self.api_url_var.get().strip()):
             messagebox.showwarning("ยังไม่ได้โหลดโมเดล", "เปิดเมนูตั้งค่า เลือกโมเดล แล้วกด ‘โหลดโมเดล’ ก่อนส่งข้อความ")
             return
         self.input.delete("1.0", "end")
-        self._append(self._t("you"), text)
+        media_note = "" if not media else f"\n📎 แนบสื่อ {len(media)} ไฟล์"
+        self._append(self._t("you"), text + media_note)
         self.messages.append({"role": "user", "content": text})
+        self.pending_media = []
+        self._update_media_status()
         self._save_history()
         self.busy = True
         self.cancel_event = threading.Event()
@@ -2440,7 +2652,7 @@ class ChatApp(ctk.CTk):
         multi_agent = bool(self.multi_agent_var.get())
         auto_router = bool(self.auto_router_var.get())
         threading.Thread(
-            target=self._agent_loop, args=(api_url, model, multi_agent, auto_router), daemon=True
+            target=self._agent_loop, args=(api_url, model, multi_agent, auto_router, media), daemon=True
         ).start()
 
     def _save_project_state(
@@ -2576,7 +2788,8 @@ class ChatApp(ctk.CTk):
         return "Multi-agent ทำงานเสร็จแล้ว\n" + "\n".join(lines)
 
     def _agent_loop(
-        self, api_url: str, model: str, multi_agent: bool, auto_router: bool = False
+        self, api_url: str, model: str, multi_agent: bool, auto_router: bool = False,
+        media: list[dict[str, Any]] | None = None,
     ) -> None:
         try:
             original_request = next(
@@ -2645,7 +2858,7 @@ class ChatApp(ctk.CTk):
             action_nudge_used = False
             enable_tools = bool(tool_schemas)
             for _ in range(MAX_TOOL_ROUNDS):
-                recent_context = self._recent_context(self.messages)
+                recent_context = with_media(self._recent_context(self.messages), media or [])
                 self.hooks.before_model(
                     len(recent_context),
                     sum(estimate_tokens(str(item.get("content", ""))) for item in recent_context),

@@ -40,6 +40,8 @@ from chatbot_app import (
     discover_models,
     estimate_tokens,
     inference_profile,
+    media_content,
+    with_media,
 )
 
 
@@ -118,6 +120,27 @@ class ToolsTest(unittest.TestCase):
         profile = inference_profile(Path("another-model.gguf"), cpu_count=8)
         self.assertEqual(profile["gpu_layers"], "auto")
         self.assertEqual(profile["threads"], 8)
+
+    def test_image_content_uses_data_url(self):
+        image = Path(self.temp.name) / "shot.png"
+        image.write_bytes(b"\x89PNG\r\n")
+        part = media_content(image)
+        self.assertEqual(part["type"], "image_url")
+        self.assertTrue(part["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_audio_content_uses_openai_input_audio(self):
+        audio = Path(self.temp.name) / "voice.wav"
+        audio.write_bytes(b"RIFFdata")
+        part = media_content(audio)
+        self.assertEqual(part["type"], "input_audio")
+        self.assertEqual(part["input_audio"]["format"], "wav")
+
+    def test_media_is_added_only_to_latest_user_message(self):
+        messages = [{"role": "user", "content": "ดูภาพ"}]
+        media = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,eA=="}}]
+        result = with_media(messages, media)
+        self.assertIsInstance(result[0]["content"], list)
+        self.assertEqual(messages[0]["content"], "ดูภาพ")
 
     def test_parse_raw_file_block(self):
         self.assertEqual(
