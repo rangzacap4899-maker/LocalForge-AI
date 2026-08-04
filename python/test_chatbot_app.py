@@ -39,6 +39,7 @@ from chatbot_app import (
     needs_tools,
     discover_models,
     estimate_tokens,
+    inference_profile,
 )
 
 
@@ -104,6 +105,19 @@ class ToolsTest(unittest.TestCase):
         for size, digest in MODEL_DOWNLOAD_META.values():
             self.assertGreater(size, 0)
             self.assertEqual(len(digest), 64)
+
+    def test_gemma_4_e4b_uses_8gb_gpu_profile(self):
+        profile = inference_profile(Path("gemma-4-E4B_q4_0-it.gguf"), cpu_count=24)
+        self.assertEqual(profile["name"], "Gemma 4 E4B · RX 8GB")
+        self.assertEqual(profile["gpu_layers"], "all")
+        self.assertEqual(profile["threads"], 12)
+        self.assertEqual(profile["context"], 8192)
+        self.assertEqual(profile["cache_type"], "q8_0")
+
+    def test_generic_profile_keeps_auto_offload(self):
+        profile = inference_profile(Path("another-model.gguf"), cpu_count=8)
+        self.assertEqual(profile["gpu_layers"], "auto")
+        self.assertEqual(profile["threads"], 8)
 
     def test_parse_raw_file_block(self):
         self.assertEqual(

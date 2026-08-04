@@ -105,6 +105,27 @@ MODEL_DOWNLOAD_META = {
 }
 
 
+def inference_profile(model_path: Path, cpu_count: int | None = None) -> dict[str, Any]:
+    """Return conservative llama.cpp settings tuned for the selected model."""
+    name = model_path.name.lower()
+    threads = max(1, min(12, cpu_count or os.cpu_count() or 4))
+    profile: dict[str, Any] = {
+        "name": "Balanced",
+        "gpu_layers": "auto",
+        "threads": threads,
+        "context": MODEL_CONTEXT_TOKENS,
+        "batch": 1024,
+        "ubatch": 256,
+        "cache_type": "q8_0",
+    }
+    if "gemma-4-e4b" in name or "gemma_4_e4b" in name:
+        # Q4_0 weights plus an 8K Q8 KV cache fit comfortably in this
+        # workstation's 8 GiB GPU. Explicit all-layer offload avoids a future
+        # llama.cpp heuristic change silently moving work back to the CPU.
+        profile.update(name="Gemma 4 E4B · RX 8GB", gpu_layers="all")
+    return profile
+
+
 def estimate_tokens(text: str) -> int:
     """Small dependency-free fallback for messages restored from history."""
     if not text:
@@ -758,6 +779,7 @@ class LocalModelManager:
         self.state_dir = state_dir
         self.process: subprocess.Popen[str] | None = None
         self.active_model: Path | None = None
+        self.active_profile: dict[str, Any] | None = None
         self._log_handle: Any = None
 
     def models(self) -> list[Path]:
@@ -775,6 +797,7 @@ class LocalModelManager:
         process = self.process
         self.process = None
         self.active_model = None
+        self.active_profile = None
         if process and process.poll() is None:
             process.terminate()
             try:
@@ -801,20 +824,20 @@ class LocalModelManager:
             raise RuntimeError(f"พอร์ต {port} ถูกใช้งานโดยเซิร์ฟเวอร์อื่น กรุณาปิดก่อน")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._log_handle = (self.state_dir / "server.log").open("w", encoding="utf-8")
-        # One interactive slot on this machine benefits from physical-core-like
-        # thread counts. Capping at 12 avoids wasting cycles on SMT contention
-        # on the 12-core Xeon while still using all cores on smaller CPUs.
-        inference_threads = max(1, min(12, os.cpu_count() or 4))
+        profile = inference_profile(model_path)
+        if gpu_layers != "auto":
+            profile["gpu_layers"] = gpu_layers
         command = [
             str(self.server_bin), "--model", str(model_path),
-            "--gpu-layers", str(gpu_layers), "--flash-attn", "auto",
-            "--fit", "on", "--threads", str(inference_threads),
-            "--threads-batch", str(inference_threads),
-            "--batch-size", "1024", "--ubatch-size", "256",
-            "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+            "--gpu-layers", str(profile["gpu_layers"]), "--flash-attn", "auto",
+            "--fit", "on", "--threads", str(profile["threads"]),
+            "--threads-batch", str(profile["threads"]),
+            "--batch-size", str(profile["batch"]), "--ubatch-size", str(profile["ubatch"]),
+            "--cache-type-k", str(profile["cache_type"]),
+            "--cache-type-v", str(profile["cache_type"]),
             "--load-mode", "mmap",
             "--reasoning", "off", "--reasoning-budget", "0",
-            "--ctx-size", str(MODEL_CONTEXT_TOKENS),
+            "--ctx-size", str(profile["context"]),
             "--parallel", "1", "--no-cont-batching", "--port", str(port),
         ]
         environment = os.environ.copy()
@@ -831,6 +854,7 @@ class LocalModelManager:
         for _ in range(120):
             if self._health(api_url):
                 self.active_model = model_path
+                self.active_profile = profile
                 return
             if self.process.poll() is not None:
                 raise RuntimeError(f"โหลดโมเดลไม่สำเร็จ ดู log ที่ {self.state_dir / 'server.log'}")
@@ -1961,7 +1985,12 @@ class ChatApp(ctk.CTk):
         def worker() -> None:
             try:
                 self.model_manager.load(Path(value), self.api_url_var.get().strip())
-                self.events.put(("model_loaded", Path(value).name))
+                profile = self.model_manager.active_profile or {}
+                profile_text = (
+                    f"{profile.get('name', 'Balanced')} • GPU {profile.get('gpu_layers', 'auto')} • "
+                    f"ctx {profile.get('context', MODEL_CONTEXT_TOKENS)}"
+                )
+                self.events.put(("model_loaded", (Path(value).name, profile_text)))
             except Exception as exc:
                 self.events.put(("model_error", str(exc)))
 
@@ -2767,7 +2796,8 @@ class ChatApp(ctk.CTk):
                 self._append(self._t("error"), text)
                 messagebox.showerror("เกิดข้อผิดพลาด", text)
             elif kind == "model_loaded":
-                self.model_status_var.set(f"กำลังใช้งาน: {text}")
+                model_name, profile_text = text
+                self.model_status_var.set(f"กำลังใช้งาน: {model_name}\n{profile_text}")
                 self.status.configure(text="โมเดลพร้อมใช้งาน", text_color=("#10B981", "#63c174"))
                 self.status_dot.configure(text_color="#43D19E")
             elif kind == "model_downloaded":
