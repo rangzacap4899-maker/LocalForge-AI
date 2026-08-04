@@ -29,6 +29,7 @@ from localforge_core import (
     choose_model,
     context_report,
     inspect_model,
+    select_recent_messages,
 )
 
 
@@ -38,7 +39,11 @@ MAX_WEB_BYTES = 1_500_000
 MAX_TOOL_ROUNDS = 12
 API_TIMEOUT_SECONDS = 900
 MAX_TOOL_RESULT_CHARS = 12_000
-MAX_CONTEXT_CHARS = 18_000
+MODEL_CONTEXT_TOKENS = 8192
+PROMPT_TOKEN_BUDGET = 5000
+CHAT_MAX_TOKENS = 1024
+TOOL_MAX_TOKENS = 2048
+FILE_MAX_TOKENS = 4096
 MAX_SAVED_MESSAGES = 100
 TEXT_PROJECT_EXTENSIONS = {".html", ".htm", ".css", ".js", ".json", ".md", ".txt", ".py", ".svg"}
 THAI_FONT = "Noto Sans Thai"
@@ -409,10 +414,11 @@ class GemmaClient:
             ],
             "chat_template_kwargs": {"enable_thinking": False},
             "reasoning_budget_tokens": 0,
-            "temperature": 0.3,
-            # Source code embedded in write_file arguments is JSON-escaped and
-            # commonly exceeds 2K tokens. A truncated call cannot be parsed.
-            "max_tokens": 4096,
+            "temperature": 0.2 if enable_tools else 0.35,
+            "top_p": 0.9,
+            # Ordinary chat should stop promptly; tool calls retain more room.
+            # Full-file generation uses generate_file() and its larger budget.
+            "max_tokens": TOOL_MAX_TOKENS if enable_tools else CHAT_MAX_TOKENS,
         }
         if enable_tools:
             payload["tools"] = OPENAI_TOOLS
@@ -473,7 +479,8 @@ class GemmaClient:
             "chat_template_kwargs": {"enable_thinking": False},
             "reasoning_budget_tokens": 0,
             "temperature": 0.25,
-            "max_tokens": 4096,
+            "top_p": 0.9,
+            "max_tokens": FILE_MAX_TOKENS,
         }
         if on_token:
             payload["stream"] = True
@@ -555,7 +562,7 @@ class GemmaClient:
 ถ้าผ่านตอบ <review status="pass"/> ถ้ามีปัญหาให้ตอบ XML เท่านั้น เช่น
 <review><issue file="path">ปัญหาและวิธีแก้แบบสั้น</issue></review>
 รายงานเฉพาะบั๊กที่ทำให้ใช้งานไม่ได้ ไม่เสนอฟีเจอร์ใหม่ และไม่เขียนโค้ด""",
-            f"คำสั่ง:\n{request_text}\n\nไฟล์:\n{files_text[:MAX_CONTEXT_CHARS]}",
+            f"คำสั่ง:\n{request_text}\n\nไฟล์:\n{files_text[:MAX_TOOL_RESULT_CHARS]}",
             900,
         )
 
@@ -762,7 +769,7 @@ class LocalModelManager:
             self._log_handle.close()
             self._log_handle = None
 
-    def load(self, model_path: Path, api_url: str, gpu_layers: int = 99) -> None:
+    def load(self, model_path: Path, api_url: str, gpu_layers: int | str = "auto") -> None:
         model_path = model_path.expanduser().resolve()
         if not model_path.is_file():
             raise RuntimeError(f"ไม่พบไฟล์โมเดล: {model_path}")
@@ -777,11 +784,21 @@ class LocalModelManager:
             raise RuntimeError(f"พอร์ต {port} ถูกใช้งานโดยเซิร์ฟเวอร์อื่น กรุณาปิดก่อน")
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._log_handle = (self.state_dir / "server.log").open("w", encoding="utf-8")
+        # One interactive slot on this machine benefits from physical-core-like
+        # thread counts. Capping at 12 avoids wasting cycles on SMT contention
+        # on the 12-core Xeon while still using all cores on smaller CPUs.
+        inference_threads = max(1, min(12, os.cpu_count() or 4))
         command = [
             str(self.server_bin), "--model", str(model_path),
             "--gpu-layers", str(gpu_layers), "--flash-attn", "auto",
+            "--fit", "on", "--threads", str(inference_threads),
+            "--threads-batch", str(inference_threads),
+            "--batch-size", "1024", "--ubatch-size", "256",
+            "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
+            "--load-mode", "mmap",
             "--reasoning", "off", "--reasoning-budget", "0",
-            "--ctx-size", "8192", "--parallel", "1", "--port", str(port),
+            "--ctx-size", str(MODEL_CONTEXT_TOKENS),
+            "--parallel", "1", "--no-cont-batching", "--port", str(port),
         ]
         environment = os.environ.copy()
         library_dir = str(self.server_bin.parent)
@@ -1029,16 +1046,7 @@ class ChatApp(ctk.CTk):
 
     @staticmethod
     def _recent_context(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        selected = []
-        size = 0
-        for message in reversed(messages):
-            content = message.get("content") or ""
-            cost = len(content) + 200
-            if selected and size + cost > MAX_CONTEXT_CHARS:
-                break
-            selected.append(message)
-            size += cost
-        return list(reversed(selected))
+        return select_recent_messages(messages, PROMPT_TOKEN_BUDGET)
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(1, weight=1)
@@ -1465,7 +1473,7 @@ class ChatApp(ctk.CTk):
     def _update_context_meter(self) -> None:
         if not hasattr(self, "context_button"):
             return
-        report = context_report(self.messages, 8192)
+        report = context_report(self.messages, MODEL_CONTEXT_TOKENS)
         color = ("#EF4444", "#FF9EAE") if report["percent"] >= 85 else ("#F59E0B", "#e5ad45") if report["percent"] >= 65 else self.MUTED
         self.context_button.configure(text=f"Context {report['percent']:.0f}%", text_color=color)
 
@@ -1491,7 +1499,7 @@ class ChatApp(ctk.CTk):
         self._render_messages()
 
     def _open_context_inspector(self) -> None:
-        report = context_report(self.messages, 8192)
+        report = context_report(self.messages, MODEL_CONTEXT_TOKENS)
         window = ctk.CTkToplevel(self)
         window.title("Context Inspector — LocalForge AI")
         window.geometry("620x560")
@@ -2161,7 +2169,7 @@ class ChatApp(ctk.CTk):
         text = self.input.get("1.0", "end").strip()
         if not text or self.busy:
             return
-        if context_report(self.messages, 8192)["percent"] >= 85:
+        if context_report(self.messages, MODEL_CONTEXT_TOKENS)["percent"] >= 85:
             self._summarize_context()
         if not self.auto_router_var.get() and not self.model_manager._health(self.api_url_var.get().strip()):
             messagebox.showwarning("ยังไม่ได้โหลดโมเดล", "เปิดเมนูตั้งค่า เลือกโมเดล แล้วกด ‘โหลดโมเดล’ ก่อนส่งข้อความ")
@@ -2336,10 +2344,12 @@ class ChatApp(ctk.CTk):
                     self.events.put(("router_model", str(desired)))
             client = GemmaClient(api_url, model)
             if requests_action(original_request):
-                recent_user_requests = [
-                    m["content"] for m in self.messages if m["role"] == "user"
-                ][-8:]
-                request_context = "\n".join(recent_user_requests)
+                recent_user_messages = select_recent_messages(
+                    [m for m in self.messages if m["role"] == "user"], 3500
+                )
+                request_context = "\n".join(
+                    str(message.get("content", "")) for message in recent_user_messages
+                )
                 if multi_agent:
                     final = self._run_multi_agent(client, request_context)
                     self.messages.append({"role": "assistant", "content": final})

@@ -30,7 +30,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def choose_model(request: str, models: list[Path], current: Path | None = None) -> Path | None:
-    """Choose an installed model by task, preferring specialized/fast local models."""
+    """Choose by task without needlessly reloading a model for ordinary chat."""
     if not models:
         return None
     lowered = request.lower()
@@ -42,8 +42,37 @@ def choose_model(request: str, models: list[Path], current: Path | None = None) 
         larger = sorted(models, key=lambda path: path.stat().st_size if path.exists() else 0, reverse=True)
         if larger:
             return larger[0]
+    # Reloading several GB of weights costs more than the small quality gain of
+    # changing a general-purpose model for every conversational turn. Keep the
+    # active model unless the request needs a coder or a larger planning model.
+    if current in models:
+        return current
     gemma = next((path for path in models if "gemma" in path.name.lower() and "mmproj" not in path.name.lower()), None)
-    return gemma or current or models[0]
+    return gemma or models[0]
+
+
+def select_recent_messages(
+    messages: list[dict[str, Any]], token_budget: int
+) -> list[dict[str, Any]]:
+    """Keep the newest complete messages that fit a model prompt budget."""
+    selected: list[dict[str, Any]] = []
+    used = 0
+    for message in reversed(messages):
+        cost = estimate_tokens(str(message.get("content", ""))) + 12
+        if selected and used + cost > token_budget:
+            break
+        if not selected and cost > token_budget:
+            # Preserve the newest request, trimmed conservatively by character
+            # ratio. This avoids submitting a prompt that the server rejects.
+            content = str(message.get("content", ""))
+            ratio = token_budget / max(1, cost)
+            trimmed = dict(message)
+            trimmed["content"] = content[-max(1, int(len(content) * ratio)):]
+            selected.append(trimmed)
+            break
+        selected.append(message)
+        used += cost
+    return list(reversed(selected))
 
 
 @dataclass

@@ -9,6 +9,7 @@ from localforge_core import (
     choose_model,
     context_report,
     inspect_model,
+    select_recent_messages,
 )
 
 
@@ -27,6 +28,7 @@ class CoreTest(unittest.TestCase):
         coder.write_bytes(b"xx")
         self.assertEqual(choose_model("สร้างเว็บด้วย JavaScript", [gemma, coder]), coder)
         self.assertEqual(choose_model("สวัสดี", [gemma, coder]), gemma)
+        self.assertEqual(choose_model("สวัสดี", [gemma, coder], coder), coder)
 
     def test_model_metadata(self):
         model = self.root / "Qwen3-8B-Q4_K_M.gguf"
@@ -65,6 +67,15 @@ class CoreTest(unittest.TestCase):
         report = context_report([{"role": "user", "content": "สวัสดี"}], 100)
         self.assertGreater(report["used"], 0)
         self.assertLessEqual(report["percent"], 100)
+
+    def test_recent_context_uses_token_budget_for_thai(self):
+        messages = [
+            {"role": "user", "content": "ก" * 1000},
+            {"role": "assistant", "content": "ข" * 1000},
+            {"role": "user", "content": "ล่าสุด"},
+        ]
+        selected = select_recent_messages(messages, 500)
+        self.assertEqual(selected, [messages[-1]])
 
 
 if __name__ == "__main__":
