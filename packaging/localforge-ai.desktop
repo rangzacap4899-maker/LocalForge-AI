@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LocalForge AI
+Comment=ผู้ช่วย AI ภายในเครื่องสำหรับสนทนา สร้างไฟล์ และค้นเว็บ
+Exec=/home/addrang/LocalForge-AI/launch_localforge_ai.sh
+Icon=system-help
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
+StartupWMClass=LocalForge AI

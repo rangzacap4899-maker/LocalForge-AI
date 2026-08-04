@@ -1,0 +1,31 @@
+# Build directories
+.cache/
+bazel-*/
+build-*/
+build/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Model files
+*.sbs
+*.spm
+*.data
+*.bin
+*.weights
+*.gguf
+models/
+
+# Locally installed inference runtime (kept as its own checkout)
+runtime/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Local development
+.env
+.env.local
