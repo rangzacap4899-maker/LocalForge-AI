@@ -162,8 +162,8 @@ GitHub repository has unrelated ancestry. Established safe publishing flow:
 
 Latest commits at handoff:
 
-- Local working history: `58d1c90 Show attached images in chat`
-- Clean GitHub history: `9b07ef3 Show attached images in chat`
+- Local working history: `2119ddc Redesign UI to Deep Space theme and add model toggle`
+- Clean GitHub history: `daf4921 Redesign UI to Deep Space theme and add model toggle`
 
 The hashes differ because of the separate histories; the file contents should
 match. Never force-push or rewrite the user's GitHub history.
