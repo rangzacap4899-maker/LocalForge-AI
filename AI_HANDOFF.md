@@ -1,6 +1,6 @@
 # LocalForge AI — handoff context
 
-Last updated: 2026-08-05 (Asia/Bangkok) — second handoff
+Last updated: 2026-08-05 (Asia/Bangkok) — third handoff
 
 This file is the durable context for another AI assistant taking over after the
 current assistant reaches a usage limit. Read the current source and `git diff`
@@ -71,6 +71,14 @@ Installed primary model files (ignored by Git):
 - `install.sh`: distro-aware installer (dnf/apt/pacman) that installs system
   packages, creates `.venv`, installs requirements, and writes/registers the
   desktop entry
+- Context summarization (`_summarize_context`) now runs a real LLM summary via
+  `GemmaClient.summarize()` in a background thread; the `send()` flow defers the
+  request until the summary lands (`_pending_send`) and falls back to fast local
+  truncation when no server is up. The status label is restored to `idle` after
+  summarizing (previously it stayed stuck on `กำลังสรุปบริบท…`)
+- The fallback summary prefix is localized (`summary_prefix` key)
+- Previously dead i18n keys `change_folder`/`project_explorer`/`undo_short` are
+  now wired as sidebar tooltips (`ToolTip` helper)
 
 ## Important source files
 
@@ -192,11 +200,15 @@ GitHub repository has unrelated ancestry. Established safe publishing flow:
 
 Latest commits at handoff:
 
-- Local working history: `f1257e6 Add multi-agent model selection, RAG search, and streaming fixes`
-- Clean GitHub history: `e671744 Add multi-agent model selection, RAG search, and streaming fixes`
+- Local working history: `7c79004 Summarize context via LLM, wire dead i18n keys as tooltips, fix install.sh import check`
+- Clean GitHub history: `393d4ec Complete i18n with live language/theme switching, RAG manager, workspace persistence, and installer`
 
 The hashes differ because of the separate histories; the file contents should
 match. Never force-push or rewrite the user's GitHub history.
+
+HTTPS push uses the `gh` auth token: `gh auth setup-git` was run once and set
+`credential.https://github.com.helper !…/gh auth git-credential` (global git
+config). There is no SSH key for GitHub, so pushes must go over HTTPS.
 
 ## Known cleanup and next checks
 
@@ -226,6 +238,17 @@ match. Never force-push or rewrite the user's GitHub history.
   `clear_cache()` for the RAG manager UI.
 - The `_open_rag_manager` window was added in `chatbot_app.py`; it is wired to
   the sidebar `rag_manage` button.
+- `_summarize_context()` now returns a bool: `True` when it completed
+  synchronously (local fallback truncation), `False` when an async LLM summary
+  is running. `send()` checks the return value and defers itself via
+  `_pending_send` (re-calls `self.send(ignore_cache)` after the summary is
+  applied on the main thread via `self.after`). The context-inspector button
+  ignores the return value.
+- `install.sh` sanity check was fixed: the import probe now inserts the
+  `python/` directory into `sys.path` (`import customtkinter, localforge_i18n`
+  used to fail with a false negative because `localforge_i18n` lives under
+  `python/`). `./install.sh --skip-deps` verified on this machine: desktop entry
+  written, `Python imports OK`, `Unit tests OK`.
 - Installer sanity notes: `install.sh` uses `dnf` on this machine; `apt`/`pacman`
   branches are untested. Desktop entry is regenerated with the real repo path.
 - After every material fix, update this file's date, verified test count, recent
