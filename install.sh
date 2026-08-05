@@ -35,7 +35,7 @@ if [[ "$SKIP_DEPS" -eq 0 ]]; then
       python3 python3-pip python3-virtualenv python3-tkinter
       zenity aria2 libnotify xdg-utils wl-clipboard
       pipewire-utils speech-dispatcher espeak-ng
-      noto-sans-thai-fonts noto-sans-cjk-sc-fonts noto-sans-cjk-jp-fonts
+      google-noto-sans-thai-fonts google-noto-sans-cjk-fonts
     )
   elif command -v apt-get >/dev/null 2>&1; then
     PKG_MGR="sudo apt-get install -y"

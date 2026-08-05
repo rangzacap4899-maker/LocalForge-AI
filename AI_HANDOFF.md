@@ -251,6 +251,12 @@ config). There is no SSH key for GitHub, so pushes must go over HTTPS.
   written, `Python imports OK`, `Unit tests OK`.
 - Installer sanity notes: `install.sh` uses `dnf` on this machine; `apt`/`pacman`
   branches are untested. Desktop entry is regenerated with the real repo path.
+  The dnf font package names were corrected after a real `dnf list` check: Fedora
+  uses `google-noto-sans-thai-fonts` + `google-noto-sans-cjk-fonts` (the old
+  Debian-style `noto-sans-thai-fonts`/`noto-sans-cjk-sc-fonts`/`noto-sans-cjk-jp-fonts`
+  do not resolve on Fedora 43). All 15 dnf packages now resolve via `dnf list`.
+  The full `sudo dnf install` step still needs an interactive password and has
+  not been executed from the agent shell.
 - After every material fix, update this file's date, verified test count, recent
   bug notes, and latest local/GitHub commits.
 
