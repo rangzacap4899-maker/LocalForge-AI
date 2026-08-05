@@ -20,7 +20,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import tkinter as tk
-import webbrowser
 from localforge_algorithms import VectorDB, get_embedding
 from pathlib import Path
 from tkinter import Menu, filedialog, messagebox, simpledialog, ttk
@@ -642,6 +641,16 @@ class GemmaClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"รูปแบบคำตอบจาก agent ไม่ถูกต้อง: {data}") from exc
 
+    def summarize(self, transcript: str) -> str:
+        """Compress an older conversation transcript into a short LLM summary."""
+        return self._role_call(
+            "คุณคือผู้ช่วยที่สรุปประวัติการสนทนาก่อนหน้าให้กระชับ "
+            "ตอบเฉพาะบทสรุปสั้นๆ 2-3 ประโยคในภาษาที่ใช้สนทนา "
+            "ห้ามทักทาย ห้ามถามกลับ ห้ามอธิบายว่าคุณคือใคร",
+            f"สรุปบทสนทนาก่อนหน้านี้:\n{transcript}",
+            512,
+        )
+
     def plan_project(self, request_text: str) -> str:
         return self._role_call(
             """คุณคือ Planner วางแผนไฟล์ขั้นต่ำที่จำเป็นสำหรับงานผู้ใช้
@@ -1136,8 +1145,7 @@ class ChatApp(ctk.CTk):
         self.configure(fg_color=self.BG)
         ctk.set_appearance_mode("dark")
 
-        workspace = Path(os.environ.get("LOCALFORGE_WORKSPACE", os.environ.get("GEMMA_WORKSPACE", Path.cwd())))
-        self.tools = Tools(workspace)
+        workspace = Path(os.environ.get("LOCALFORGE_WORKSPACE", os.environ.get("GEMMA_WORKSPACE", Path.home())))
         state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
         self.state_dir = state_home / "localforge-ai"
         legacy_state_dir = state_home / "gemma-assistant"
@@ -1155,9 +1163,20 @@ class ChatApp(ctk.CTk):
         if language not in LANGUAGE_NAMES:
             language = "th"
         self.language_var = ctk.StringVar(value=language)
+        self._lang_code = language
         self.language_name_var = ctk.StringVar(value=LANGUAGE_NAMES[language])
         global THAI_FONT
         THAI_FONT = LANGUAGE_FONTS[language]
+        if not os.environ.get("LOCALFORGE_WORKSPACE") and not os.environ.get("GEMMA_WORKSPACE"):
+            saved_workspace = str(preferences.get("workspace", "")).strip()
+            if saved_workspace:
+                try:
+                    resolved = Path(saved_workspace).expanduser().resolve()
+                    if resolved.is_dir():
+                        workspace = resolved
+                except OSError:
+                    pass
+        self.tools = Tools(workspace)
         self.file_transaction = FileTransaction(self.tools.workspace, self.state_dir / "backups")
         self.hooks = HookEngine(self.state_dir / "audit.jsonl", MAX_TOOL_RESULT_CHARS)
         self.mcp_manager = MCPManager(self.state_dir / "mcp_servers.json", self.tools.workspace)
@@ -1194,6 +1213,7 @@ class ChatApp(ctk.CTk):
         self.busy = False
         self.cancel_event = threading.Event()
         self.request_started = 0.0
+        self._pending_send: bool | None = None
         self.stream_buffer = ""
         self.stream_widgets: dict[str, Any] | None = None
         self.chat_images: list[tk.PhotoImage] = []
@@ -1210,7 +1230,7 @@ class ChatApp(ctk.CTk):
         self.after(1000, self._update_system_monitor)
 
     def _t(self, key: str, **values: Any) -> str:
-        return translate(self.language_var.get(), key, **values)
+        return translate(self._lang_code, key, **values)
 
     def _load_preferences(self) -> dict[str, Any]:
         try:
@@ -1242,6 +1262,7 @@ class ChatApp(ctk.CTk):
             "appearance": self.appearance_var.get(),
             "font_scale": float(self.font_scale_var.get()),
             "language": self.language_var.get(),
+            "workspace": str(self.tools.workspace),
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _load_history(self) -> list[dict[str, Any]]:
@@ -1274,11 +1295,6 @@ class ChatApp(ctk.CTk):
             and isinstance(m.get("content"), str)
             and not m.get("tool_calls")
         ][-MAX_SAVED_MESSAGES:]
-        self.history_file.parent.mkdir(parents=True, exist_ok=True)
-        self.history_file.write_text(
-            json.dumps({"version": 1, "messages": saved}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
         self.conversation_store.set_messages(saved)
         if threading.current_thread() is threading.main_thread():
             if hasattr(self, "conversation_list"):
@@ -1321,17 +1337,23 @@ class ChatApp(ctk.CTk):
         ).pack(anchor="w", pady=(0, 0))
 
         ctk.CTkButton(
-            side, text="＋ " + self._t("new_chat"), height=32, corner_radius=8,
+            side, text=self._t("new_chat"), height=32, corner_radius=8,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color="#B9A8FF",
             border_width=1, border_color=self.ACCENT,
             font=ctk.CTkFont(size=12, weight="bold"), command=self._clear
         ).pack(fill="x", padx=14, pady=(0, 8))
 
         ctk.CTkButton(
-            side, text="📚 Index Document (RAG)", height=32, corner_radius=8,
+            side, text=self._t("index_rag"), height=32, corner_radius=8,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color="#A7F3D0",
             border_width=1, border_color="#34D399",
             font=ctk.CTkFont(size=12, weight="bold"), command=self._index_document
+        ).pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkButton(
+            side, text=self._t("rag_manage"), height=28, corner_radius=8,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            border_width=1, border_color=self.BORDER,
+            font=ctk.CTkFont(size=11), command=self._open_rag_manager
         ).pack(fill="x", padx=14, pady=(0, 18))
 
         # Reserve the sidebar footer before adding expandable content.  Tk's
@@ -1371,21 +1393,26 @@ class ChatApp(ctk.CTk):
             font=ctk.CTkFont(size=11), command=self._choose_workspace
         )
         self.workspace_button.pack(fill="x", pady=(0, 6))
+        ToolTip(self.workspace_button, self._t("change_folder"))
 
         ws_actions = ctk.CTkFrame(workspace_card, fg_color="transparent")
         ws_actions.pack(fill="x", pady=(0, 18))
-        ctk.CTkButton(
-            ws_actions, text="☰ " + self._t("explorer"), height=26, corner_radius=6,
+        explorer_button = ctk.CTkButton(
+            ws_actions, text=self._t("explorer"), height=26, corner_radius=6,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             border_width=1, border_color=self.BORDER,
             font=ctk.CTkFont(size=11), command=self._open_project_explorer,
-        ).pack(side="left", fill="x", expand=True, padx=(0, 3))
-        ctk.CTkButton(
-            ws_actions, text="↶ " + self._t("undo"), height=26, corner_radius=6,
+        )
+        explorer_button.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        ToolTip(explorer_button, self._t("project_explorer"))
+        undo_button = ctk.CTkButton(
+            ws_actions, text=self._t("undo"), height=26, corner_radius=6,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             border_width=1, border_color=self.BORDER,
             font=ctk.CTkFont(size=11), command=self._undo_files,
-        ).pack(side="right", fill="x", expand=True, padx=(3, 0))
+        )
+        undo_button.pack(side="right", fill="x", expand=True, padx=(3, 0))
+        ToolTip(undo_button, self._t("undo_short"))
 
         conversations = ctk.CTkFrame(side, fg_color="transparent")
         conversations.pack(fill="both", expand=True, padx=14, pady=(0, 6))
@@ -1524,11 +1551,15 @@ class ChatApp(ctk.CTk):
         self.router_switch.pack(side="left", padx=(12, 8))
 
         self.agent_switch = ctk.CTkSwitch(
-            media_bar, text="Multi-agent", variable=self.multi_agent_var,
+            media_bar, text=self._t("multi_agent_switch"), variable=self.multi_agent_var,
             font=ctk.CTkFont(size=11), text_color=self.MUTED, switch_width=32, switch_height=16,
             command=self._save_preferences
         )
         self.agent_switch.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(
+            media_bar, text=self._t("multi_agent_flow"), text_color=self.MUTED,
+            font=ctk.CTkFont(family=THAI_FONT, size=9),
+        ).pack(side="left", padx=(0, 8))
         self.media_status = ctk.CTkLabel(
             media_bar, text="", text_color=self.MUTED,
             font=ctk.CTkFont(family=THAI_FONT, size=10),
@@ -1703,7 +1734,7 @@ class ChatApp(ctk.CTk):
         token_label = None
         if not is_user and not is_system:
             shown_tokens = token_count if token_count is not None else estimate_tokens(text)
-            suffix = "tokens" if token_count is not None else "tokens โดยประมาณ"
+            suffix = "tokens" if token_count is not None else self._t("tokens_approx")
             detail = f"{shown_tokens:,} {suffix}"
             if metrics:
                 elapsed = float(metrics.get("elapsed", 0))
@@ -1711,7 +1742,7 @@ class ChatApp(ctk.CTk):
                 model_name = metrics.get("model", "")
                 detail += f"  •  {elapsed:.1f}s  •  {speed:.1f} tok/s"
                 if metrics.get("prompt_tokens"):
-                    detail = f"in {int(metrics['prompt_tokens']):,} • out " + detail
+                    detail = self._t("in_out", prompt_tokens=int(metrics["prompt_tokens"]), detail=detail)
                 if model_name:
                     detail += f"  •  {model_name}"
             token_label = ctk.CTkLabel(
@@ -1834,15 +1865,11 @@ class ChatApp(ctk.CTk):
         ctk.set_widget_scaling(scale)
         ctk.set_window_scaling(scale)
 
-    def _select_language(self, display_name: str) -> None:
-        self.language_var.set(LANGUAGE_CODES.get(display_name, "en"))
-        self._save_preferences()
-
     def _notify_finished(self) -> None:
         notifier = shutil.which("notify-send")
         if notifier and self.focus_displayof() is None:
             subprocess.Popen(
-                [notifier, "LocalForge AI", "งานของคุณเสร็จแล้ว"],
+                [notifier, "LocalForge AI", self._t("notify_done")],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
 
@@ -1863,7 +1890,9 @@ class ChatApp(ctk.CTk):
             return
         report = context_report(self.messages, MODEL_CONTEXT_TOKENS)
         color = ("#EF4444", "#FF9EAE") if report["percent"] >= 85 else ("#F59E0B", "#e5ad45") if report["percent"] >= 65 else self.MUTED
-        self.context_button.configure(text=f"Context {report['percent']:.0f}%", text_color=color)
+        self.context_button.configure(
+            text=self._t("context_meter", percent=f"{report['percent']:.0f}"), text_color=color,
+        )
 
     def _trim_context(self) -> None:
         if len(self.messages) <= 8:
@@ -1872,27 +1901,66 @@ class ChatApp(ctk.CTk):
         self._save_history()
         self._render_messages()
 
-    def _summarize_context(self) -> None:
+    def _summarize_context(self) -> bool:
+        """Summarize older messages; returns True when done synchronously
+        (local fallback), False while an async LLM summary is running."""
         if len(self.messages) <= 8:
-            return
+            return True
         old, recent = self.messages[:-6], self.messages[-6:]
+        api_url = self.api_url_var.get().strip()
+        if not self.model_manager._health(api_url):
+            self._apply_summary(self._fallback_summary(old), recent)
+            return True
+        self.status.configure(text=self._t("summarizing"), text_color=("#F59E0B", "#e5ad45"))
+        client = GemmaClient(api_url, self.model_var.get().strip())
+        threading.Thread(
+            target=self._summarize_worker, args=(client, old, recent), daemon=True
+        ).start()
+        return False
+
+    def _summarize_worker(
+        self, client: GemmaClient, old: list[dict[str, Any]], recent: list[dict[str, Any]]
+    ) -> None:
+        try:
+            transcript = "\n".join(
+                ("ผู้ใช้" if message.get("role") == "user" else "AI")
+                + ": "
+                + re.sub(r"\s+", " ", str(message.get("content", ""))).strip()[:240]
+                for message in old[-20:]
+            ) or "(ไม่มีข้อความ)"
+            summary = client.summarize(transcript)
+        except Exception:
+            summary = self._fallback_summary(old)
+        self.after(0, lambda: self._apply_summary(summary, recent))
+
+    def _fallback_summary(self, old: list[dict[str, Any]]) -> str:
         facts = []
         for message in old:
             content = re.sub(r"\s+", " ", str(message.get("content", ""))).strip()
             if content:
                 facts.append(("ผู้ใช้: " if message.get("role") == "user" else "AI: ") + content[:180])
-        summary = "สรุปบริบทก่อนหน้า:\n" + "\n".join(f"- {item}" for item in facts[-12:])
+        return self._t("summary_prefix") + "\n" + "\n".join(f"- {item}" for item in facts[-12:])
+
+    def _apply_summary(self, summary: str, recent: list[dict[str, Any]]) -> None:
+        if not summary:
+            return
         self.messages = [{"role": "assistant", "content": summary}, *recent]
         self._save_history()
         self._render_messages()
+        self.status.configure(text=self._t("idle"), text_color=("#10B981", "#63c174"))
+        pending = self._pending_send
+        self._pending_send = None
+        if pending is not None:
+            self.send(pending)
 
     def _open_context_inspector(self) -> None:
         report = context_report(self.messages, MODEL_CONTEXT_TOKENS)
         window = ctk.CTkToplevel(self)
-        window.title("Context Inspector — LocalForge AI")
+        window.title(self._t("context_inspector_title"))
         window.geometry("620x560")
         ctk.CTkLabel(
-            window, text=f"ใช้ {report['used']:,} / {report['maximum']:,} tokens ({report['percent']}%)",
+            window, text=self._t("context_usage",
+                                 used=report["used"], maximum=report["maximum"], percent=f"{report['percent']}"),
             font=ctk.CTkFont(family=THAI_FONT, size=20, weight="bold")
         ).pack(fill="x", padx=22, pady=(22, 8))
         progress = ctk.CTkProgressBar(window, progress_color=self.ACCENT)
@@ -1901,12 +1969,12 @@ class ChatApp(ctk.CTk):
         details = ctk.CTkTextbox(window, font=ctk.CTkFont(family=THAI_FONT, size=12))
         details.pack(fill="both", expand=True, padx=22, pady=8)
         lines = [f"{index + 1}. {entry['role']} — {entry['tokens']:,} tokens" for index, entry in enumerate(report["entries"])]
-        details.insert("1.0", "\n".join(lines) or "ยังไม่มีบริบท")
+        details.insert("1.0", "\n".join(lines) or self._t("context_empty"))
         details.configure(state="disabled")
         buttons = ctk.CTkFrame(window, fg_color="transparent")
         buttons.pack(fill="x", padx=22, pady=(6, 20))
-        ctk.CTkButton(buttons, text="เก็บเฉพาะ 8 ข้อความล่าสุด", command=lambda: (self._trim_context(), window.destroy())).pack(side="left")
-        ctk.CTkButton(buttons, text="สรุปบริบทเก่า", command=lambda: (self._summarize_context(), window.destroy())).pack(side="right")
+        ctk.CTkButton(buttons, text=self._t("trim_recent"), command=lambda: (self._trim_context(), window.destroy())).pack(side="left")
+        ctk.CTkButton(buttons, text=self._t("summarize_old"), command=lambda: (self._summarize_context(), window.destroy())).pack(side="right")
 
     def _delete_message(self, index: int) -> None:
         if 0 <= index < len(self.messages):
@@ -1918,7 +1986,7 @@ class ChatApp(ctk.CTk):
         if not (0 <= index < len(self.messages)):
             return
         value = simpledialog.askstring(
-            "แก้ไขข้อความ", "แก้ไขแล้วส่งใหม่:",
+            self._t("edit_message_title"), self._t("edit_message_prompt"),
             initialvalue=str(self.messages[index].get("content", "")), parent=self,
         )
         if value:
@@ -1965,7 +2033,9 @@ class ChatApp(ctk.CTk):
         if label:
             elapsed = max(0.1, time.monotonic() - self.request_started)
             tokens = estimate_tokens(self.stream_buffer)
-            label.configure(text=f"{tokens:,} tokens  •  {elapsed:.1f}s  •  {tokens / elapsed:.1f} tok/s")
+            label.configure(text=self._t(
+                "stream_speed", tokens=tokens, elapsed=elapsed, speed=tokens / elapsed
+            ))
         self.chat._parent_canvas.yview_moveto(1.0)
 
     def _finish_stream(
@@ -2004,7 +2074,7 @@ class ChatApp(ctk.CTk):
         selected = None
         if zenity:
             result = subprocess.run(
-                [zenity, "--file-selection", "--directory", "--title=เลือกโฟลเดอร์ Workspace", f"--filename={self.tools.workspace}/"],
+                [zenity, "--file-selection", "--directory", f"--title={self._t('choose_workspace_title')}", f"--filename={self.tools.workspace}/"],
                 capture_output=True, text=True
             )
             if result.returncode == 0:
@@ -2074,7 +2144,7 @@ class ChatApp(ctk.CTk):
             self.conversation_store.export_markdown(path)
 
     def _request_file_approval(self, files: list[tuple[str, str]]) -> bool:
-        diffs = [self.file_transaction.preview(path, content) or f"ไฟล์ใหม่: {path}\n" for path, content in files]
+        diffs = [self.file_transaction.preview(path, content) or self._t("diff_new_file", path=path) + "\n" for path, content in files]
         request = {"files": files, "diff": "\n".join(diffs), "event": threading.Event(), "approved": False}
         self.events.put(("diff_request", request))
         while not request["event"].wait(0.1):
@@ -2132,11 +2202,11 @@ class ChatApp(ctk.CTk):
 
     def _show_diff_review(self, request: dict[str, Any]) -> None:
         window = ctk.CTkToplevel(self)
-        window.title("ตรวจสอบการเปลี่ยนแปลง — LocalForge AI")
+        window.title(self._t("diff_title"))
         window.geometry("900x680")
         window.transient(self)
         ctk.CTkLabel(
-            window, text=f"AI ต้องการแก้ไข {len(request['files'])} ไฟล์",
+            window, text=self._t("diff_count", count=len(request['files'])),
             font=ctk.CTkFont(family=THAI_FONT, size=20, weight="bold")
         ).pack(fill="x", padx=22, pady=(20, 8))
         preview = ctk.CTkTextbox(
@@ -2144,7 +2214,7 @@ class ChatApp(ctk.CTk):
             fg_color=self.BG, border_width=1, border_color=self.BORDER,
         )
         preview.pack(fill="both", expand=True, padx=22, pady=8)
-        preview.insert("1.0", request["diff"] or "ไม่มีความแตกต่าง")
+        preview.insert("1.0", request["diff"] or self._t("diff_empty"))
         preview.configure(state="disabled")
         buttons = ctk.CTkFrame(window, fg_color="transparent")
         buttons.pack(fill="x", padx=22, pady=(6, 20))
@@ -2155,7 +2225,7 @@ class ChatApp(ctk.CTk):
             window.destroy()
 
         ctk.CTkButton(buttons, text=self._t("cancel"), command=lambda: decide(False), fg_color="#713747").pack(side="left")
-        ctk.CTkButton(buttons, text="อนุมัติและเขียนไฟล์", command=lambda: decide(True), fg_color=self.ACCENT).pack(side="right")
+        ctk.CTkButton(buttons, text=self._t("diff_approve"), command=lambda: decide(True), fg_color=self.ACCENT).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", lambda: decide(False))
         window.grab_set()
 
@@ -2170,9 +2240,9 @@ class ChatApp(ctk.CTk):
         try:
             restored = self.file_transaction.undo()
             self.changed_files.update(restored)
-            self._append(self._t("system"), "ย้อนคืนแล้ว: " + ", ".join(restored))
+            self._append(self._t("system"), self._t("undo_done", paths=", ".join(restored)))
         except Exception as exc:
-            messagebox.showwarning("ย้อนคืนไม่ได้", str(exc))
+            messagebox.showwarning(self._t("undo_title"), str(exc))
 
     def _open_path(self, path: Path) -> None:
         if path.suffix.lower() in {".html", ".htm"}:
@@ -2194,11 +2264,11 @@ class ChatApp(ctk.CTk):
             if executable:
                 subprocess.Popen([executable, *arguments])
                 return
-        messagebox.showwarning("Terminal", "ไม่พบโปรแกรม Terminal")
+        messagebox.showwarning("Terminal", self._t("no_terminal"))
 
     def _open_project_explorer(self) -> None:
         window = ctk.CTkToplevel(self)
-        window.title("Project Explorer — LocalForge AI")
+        window.title(self._t("pe_title"))
         window.geometry("720x650")
         window.transient(self)
         toolbar = ctk.CTkFrame(window, fg_color="transparent")
@@ -2257,7 +2327,7 @@ class ChatApp(ctk.CTk):
             path = selected_path()
             if not path or path == self.tools.workspace:
                 return
-            name = simpledialog.askstring("เปลี่ยนชื่อ", "ชื่อใหม่:", initialvalue=path.name, parent=window)
+            name = simpledialog.askstring(self._t("pe_rename_title"), self._t("pe_rename_prompt"), initialvalue=path.name, parent=window)
             if name and Path(name).name == name:
                 path.rename(path.with_name(name))
                 refresh()
@@ -2266,18 +2336,18 @@ class ChatApp(ctk.CTk):
             path = selected_path()
             if not path or path == self.tools.workspace:
                 return
-            if not messagebox.askyesno("ลบไฟล์", f"ลบ {path.name} หรือไม่?", parent=window):
+            if not messagebox.askyesno(self._t("pe_delete_title"), self._t("pe_delete_confirm", name=path.name), parent=window):
                 return
             try:
                 path.unlink() if path.is_file() else path.rmdir()
                 refresh()
             except OSError as exc:
-                messagebox.showerror("ลบไม่ได้", f"ลบได้เฉพาะโฟลเดอร์ว่าง\n{exc}", parent=window)
+                messagebox.showerror(self._t("pe_delete_error_title"), self._t("pe_delete_error_text", error=exc), parent=window)
 
         for label, command in (
-            ("รีเฟรช", refresh), ("เปิด", open_selected),
-            ("Terminal", self._open_terminal),
-            ("เปิด index.html", lambda: self._open_path(self.tools.workspace / "index.html")),
+            (self._t("pe_refresh"), refresh), (self._t("pe_open"), open_selected),
+            (self._t("pe_terminal"), self._open_terminal),
+            (self._t("pe_open_index"), lambda: self._open_path(self.tools.workspace / "index.html")),
         ):
             ctk.CTkButton(
                 toolbar, text=label, width=110, height=36, corner_radius=8,
@@ -2286,9 +2356,9 @@ class ChatApp(ctk.CTk):
                 font=ctk.CTkFont(size=12, weight="bold"), command=command
             ).pack(side="left", padx=4)
         context = Menu(window, tearoff=False)
-        context.add_command(label="เปิด", command=open_selected)
-        context.add_command(label="เปลี่ยนชื่อ", command=rename_selected)
-        context.add_command(label="ลบ", command=delete_selected)
+        context.add_command(label=self._t("pe_open"), command=open_selected)
+        context.add_command(label=self._t("pe_rename"), command=rename_selected)
+        context.add_command(label=self._t("pe_delete"), command=delete_selected)
         tree.bind("<Double-1>", open_selected)
         tree.bind("<Button-3>", lambda event: (tree.selection_set(tree.identify_row(event.y)), context.tk_popup(event.x_root, event.y_root)))
         refresh()
@@ -2307,22 +2377,57 @@ class ChatApp(ctk.CTk):
         current = ctk.get_appearance_mode()
         new_mode = "Light" if current == "Dark" else "Dark"
         ctk.set_appearance_mode(new_mode)
+        self.appearance_var.set(new_mode)
+        self._save_preferences()
 
     def _header_model_selected(self, choice: str) -> None:
         self._model_selected(choice)
         self._save_preferences()
+
+    def _rebuild_ui(self) -> None:
+        self._compact_layout = None
+        for child in self.winfo_children():
+            child.destroy()
+        try:
+            self.unbind("<Configure>")
+        except tk.TclError:
+            pass
+        self._build_ui()
+
+    def _select_language(self, display_name: str) -> None:
+        code = LANGUAGE_CODES.get(display_name, "en")
+        if code == self.language_var.get():
+            return
+        if self.busy:
+            messagebox.showwarning(self._t("language"), self._t("busy_blocked_language"))
+            self.language_name_var.set(LANGUAGE_NAMES[self.language_var.get()])
+            return
+        self.language_var.set(code)
+        self._lang_code = code
+        global THAI_FONT
+        THAI_FONT = LANGUAGE_FONTS[code]
+        self._save_preferences()
+        if self.settings_window is not None and self.settings_window.winfo_exists():
+            try:
+                self.settings_window.grab_release()
+            except Exception:
+                pass
+            self.settings_window.destroy()
+            self.settings_window = None
+        self.after(120, self._rebuild_ui)
 
     def _model_selected(self, value: str | None = None) -> None:
         value = value or self.selected_model_var.get()
         try:
             model_path = self.model_manager.root / value if value else Path()
             info = inspect_model(model_path)
-            text = (
-                f"{info.parameters} • {info.quantization} • "
-                f"{info.size_bytes / 1024**3:.2f} GiB • VRAM ≈ {info.estimated_vram_gib:.1f} GiB"
+            text = self._t(
+                "model_info_fmt",
+                parameters=info.parameters, quantization=info.quantization,
+                size=info.size_bytes / 1024**3, vram=info.estimated_vram_gib,
             )
         except OSError:
-            text = "ไม่พบข้อมูลโมเดล"
+            text = self._t("model_info_missing")
         if hasattr(self, "model_info_label") and self.model_info_label.winfo_exists():
             self.model_info_label.configure(text=text)
 
@@ -2331,7 +2436,7 @@ class ChatApp(ctk.CTk):
         resolved = self._resolve_model_path(value) if value else None
         model_path = self.model_manager.root / resolved if resolved else Path()
         if not value or not resolved or not model_path.is_file():
-            messagebox.showwarning(self._t("error"), "กรุณาเลือกไฟล์โมเดลก่อน")
+            messagebox.showwarning(self._t("error"), self._t("select_model_first"))
             return
         self.model_status_var.set(self._t("loading_model"))
         self.status.configure(text=self._t("loading_model"), text_color=("#F59E0B", "#e5ad45"))
@@ -2340,9 +2445,11 @@ class ChatApp(ctk.CTk):
             try:
                 self.model_manager.load(resolved, self.api_url_var.get().strip())
                 profile = self.model_manager.active_profile or {}
-                profile_text = (
-                    f"{profile.get('name', 'Balanced')} • GPU {profile.get('gpu_layers', 'auto')} • "
-                    f"ctx {profile.get('context', MODEL_CONTEXT_TOKENS)}"
+                profile_text = self._t(
+                    "profile_fmt",
+                    name=profile.get('name', 'Balanced'),
+                    gpu=profile.get('gpu_layers', 'auto'),
+                    ctx=profile.get('context', MODEL_CONTEXT_TOKENS),
                 )
                 self.events.put(("model_loaded", (Path(value).name, profile_text)))
             except Exception as exc:
@@ -2366,7 +2473,7 @@ class ChatApp(ctk.CTk):
         name = self.download_model_var.get()
         if name not in MODEL_CATALOG:
             return
-        self.model_status_var.set(f"กำลังดาวน์โหลด {name}…")
+        self.model_status_var.set(self._t("downloading_model", name=name))
         self.download_cancel_event = threading.Event()
         if hasattr(self, "download_progress"):
             self.download_progress.set(0)
@@ -2380,7 +2487,7 @@ class ChatApp(ctk.CTk):
                 )
                 self.events.put(("model_downloaded", str(path)))
             except Exception as exc:
-                self.events.put(("model_error", f"ดาวน์โหลดไม่สำเร็จ: {exc}"))
+                self.events.put(("model_error", self._t("download_failed", error=exc)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2393,7 +2500,7 @@ class ChatApp(ctk.CTk):
         model_path = self.model_manager.root / resolved if resolved else Path()
         if not value or not resolved or not model_path.is_file():
             return
-        if not messagebox.askyesno("ลบโมเดล", f"ต้องการลบ {model_path.name} หรือไม่?"):
+        if not messagebox.askyesno(self._t("delete_model_title"), self._t("delete_model_confirm", name=model_path.name)):
             return
         try:
             self.model_manager.delete(model_path)
@@ -2404,15 +2511,15 @@ class ChatApp(ctk.CTk):
             if hasattr(self, "header_model_menu") and self.header_model_menu.winfo_exists():
                 self.header_model_menu.configure(values=choices)
             self._model_selected(choices[0])
-            self.model_status_var.set("ลบโมเดลแล้ว")
+            self.model_status_var.set(self._t("model_deleted"))
         except Exception as exc:
-            messagebox.showerror("ลบโมเดลไม่สำเร็จ", str(exc))
+            messagebox.showerror(self._t("delete_model_failed_title"), str(exc))
 
     def _benchmark_model(self) -> None:
         if not self.auto_router_var.get() and not self.model_manager._health(self.api_url_var.get().strip()):
-            messagebox.showwarning("Benchmark", "โหลดโมเดลก่อนเริ่ม benchmark")
+            messagebox.showwarning(self._t("benchmark"), self._t("benchmark_warn"))
             return
-        self.model_status_var.set("กำลัง benchmark…")
+        self.model_status_var.set(self._t("benchmark_running"))
 
         def worker() -> None:
             try:
@@ -2421,7 +2528,12 @@ class ChatApp(ctk.CTk):
                 answer = client.generate([{"role": "user", "content": "เขียนรายการเลข 1 ถึง 30 คั่นด้วยช่องว่างเท่านั้น"}], False)
                 elapsed = time.monotonic() - started
                 speed = client.last_completion_tokens / elapsed if elapsed else 0
-                self.events.put(("benchmark", f"{speed:.1f} tokens/s • {client.last_completion_tokens} tokens • {elapsed:.1f}s"))
+                self.events.put(("benchmark", self._t(
+                    "benchmark_done",
+                    speed=f"{speed:.1f}",
+                    tokens=client.last_completion_tokens,
+                    elapsed=f"{elapsed:.1f}",
+                )))
             except Exception as exc:
                 self.events.put(("model_error", str(exc)))
 
@@ -2441,19 +2553,19 @@ class ChatApp(ctk.CTk):
             window, text=self._t("audit_log", path=self.hooks.audit_path), anchor="w",
             text_color=self.MUTED, font=ctk.CTkFont(family=THAI_FONT, size=10),
         ).pack(fill="x", padx=24, pady=(0, 12))
-        status_var = ctk.StringVar(value="พร้อม")
+        status_var = ctk.StringVar(value=self._t("mcp_ready"))
         status = ctk.CTkLabel(window, textvariable=status_var, anchor="w", text_color=self.MUTED)
         status.pack(fill="x", padx=24, pady=(0, 8))
         server_list = ctk.CTkScrollableFrame(window, fg_color="transparent", height=260)
         server_list.pack(fill="both", expand=True, padx=24, pady=(0, 10))
 
         def test_server(name: str) -> None:
-            status_var.set(f"กำลังเชื่อมต่อ {name}…")
+            status_var.set(self._t("mcp_connecting", name=name))
 
             def worker() -> None:
                 try:
                     count = self.mcp_manager.test(name)
-                    self.events.put(("mcp_status", (status_var, f"{name}: พร้อม • {count} tools")))
+                    self.events.put(("mcp_status", (status_var, self._t("mcp_test_ok", name=name, count=count))))
                 except Exception as exc:
                     self.events.put(("mcp_status", (status_var, f"{name}: {exc}")))
 
@@ -2507,10 +2619,10 @@ class ChatApp(ctk.CTk):
                 self.mcp_manager.add(name_entry.get(), command_entry.get(), "ask")
                 name_entry.delete(0, "end")
                 command_entry.delete(0, "end")
-                status_var.set("เพิ่ม server แล้ว • permission: ask")
+                status_var.set(self._t("mcp_added"))
                 refresh()
             except Exception as exc:
-                messagebox.showerror("เพิ่ม MCP server ไม่สำเร็จ", str(exc), parent=window)
+                messagebox.showerror(self._t("mcp_add_failed"), str(exc), parent=window)
 
         ctk.CTkButton(add_card, text=self._t("add_server"), command=add_server).pack(fill="x", padx=14, pady=(8, 12))
         ctk.CTkLabel(
@@ -2563,7 +2675,7 @@ class ChatApp(ctk.CTk):
             border_width=1, border_color=self.BORDER
         )
         card.pack(fill="x", padx=28)
-        ctk.CTkLabel(card, text="API ENDPOINT", anchor="w", text_color=self.MUTED,
+        ctk.CTkLabel(card, text=self._t("api_endpoint"), anchor="w", text_color=self.MUTED,
                      font=ctk.CTkFont(size=10, weight="bold")).pack(fill="x", padx=16, pady=(16, 0))
         ctk.CTkEntry(
             card, textvariable=self.api_url_var, height=40, corner_radius=9,
@@ -2648,9 +2760,9 @@ class ChatApp(ctk.CTk):
         agent_choices = ["auto"] + choices
 
         for role, var_name, label in [
-            ("planner", self.planner_model_var, "Planner Model:"),
-            ("coder", self.coder_model_var, "Coder Model:"),
-            ("reviewer", self.reviewer_model_var, "Reviewer Model:"),
+            ("planner", self.planner_model_var, self._t("planner_model")),
+            ("coder", self.coder_model_var, self._t("coder_model")),
+            ("reviewer", self.reviewer_model_var, self._t("reviewer_model")),
         ]:
             if var_name.get() not in agent_choices:
                 var_name.set("auto")
@@ -2811,20 +2923,20 @@ class ChatApp(ctk.CTk):
     def _attach_media_path(self, path: Path) -> None:
         path = path.expanduser().resolve()
         if not path.is_file():
-            raise RuntimeError(f"ไม่พบไฟล์: {path}")
+            raise RuntimeError(self._t("file_not_found", path=path))
         if path.stat().st_size > 25 * 1024 * 1024:
-            raise RuntimeError("ไฟล์สื่อต้องมีขนาดไม่เกิน 25 MB")
+            raise RuntimeError(self._t("media_too_big"))
         part = media_content(path)
         self.pending_media.append((path, part))
         self._update_media_status()
 
     def _index_document(self) -> None:
         if not self.model_manager.active_model:
-            messagebox.showwarning("RAG", "กรุณาโหลดโมเดลที่มีการเปิดใช้งาน Embeddings ก่อน")
+            messagebox.showwarning(self._t("rag_manage"), self._t("rag_warn"))
             return
 
         value = filedialog.askopenfilename(
-            parent=self, title="เลือกไฟล์เอกสาร (RAG)",
+            parent=self, title=self._t("rag_pick"),
             filetypes=[("Text files", "*.txt *.md *.csv *.json"), ("All files", "*")],
         )
         if not value:
@@ -2834,18 +2946,64 @@ class ChatApp(ctk.CTk):
             content = Path(value).read_text(encoding="utf-8")
             # Simple chunking
             chunks = [content[i:i+1000] for i in range(0, len(content), 800)]
-            self.status.configure(text=f"กำลัง Index เอกสาร {len(chunks)} ส่วน...", text_color="#34D399")
+            self.status.configure(text=self._t("rag_indexing", count=len(chunks)), text_color="#34D399")
 
             def worker():
                 for i, chunk in enumerate(chunks):
                     emb = get_embedding(self.api_url_var.get().strip(), chunk)
                     if emb:
                         self.vector_db.add_rag_chunk(Path(value).name, chunk, emb)
-                self.events.put(("tool", f"✓ Index เอกสาร {Path(value).name} สำเร็จแล้ว"))
+                self.events.put(("tool", self._t("rag_indexed", name=Path(value).name)))
 
             threading.Thread(target=worker, daemon=True).start()
         except Exception as exc:
             messagebox.showerror(self._t("error"), str(exc))
+
+    def _open_rag_manager(self) -> None:
+        window = ctk.CTkToplevel(self)
+        window.title(self._t("rag_title"))
+        window.geometry("560x360")
+        window.transient(self)
+        rag, cache = self.vector_db.counts()
+        stats_var = ctk.StringVar(value=self._t("rag_stats", chunks=rag, cache=cache))
+        ctk.CTkLabel(
+            window, textvariable=stats_var, anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(family=THAI_FONT, size=18, weight="bold"),
+        ).pack(fill="x", padx=28, pady=(28, 18))
+
+        def refresh() -> None:
+            rag, cache = self.vector_db.counts()
+            stats_var.set(self._t("rag_stats", chunks=rag, cache=cache))
+
+        def clear_rag() -> None:
+            if not messagebox.askyesno(self._t("rag_clear_chunks"), self._t("rag_confirm"), parent=window):
+                return
+            self.vector_db.clear_rag()
+            self.status.configure(text=self._t("rag_cleared"), text_color="#10B981")
+            refresh()
+
+        def clear_cache() -> None:
+            if not messagebox.askyesno(self._t("rag_clear_cache"), self._t("rag_confirm"), parent=window):
+                return
+            self.vector_db.clear_cache()
+            self.status.configure(text=self._t("rag_cleared"), text_color="#10B981")
+            refresh()
+
+        ctk.CTkButton(
+            window, text=self._t("rag_clear_chunks"), height=40, corner_radius=10,
+            fg_color="#713747", hover_color="#8a4458",
+            font=ctk.CTkFont(size=13, weight="bold"), command=clear_rag,
+        ).pack(fill="x", padx=28, pady=(0, 10))
+        ctk.CTkButton(
+            window, text=self._t("rag_clear_cache"), height=40, corner_radius=10,
+            fg_color="#713747", hover_color="#8a4458",
+            font=ctk.CTkFont(size=13, weight="bold"), command=clear_cache,
+        ).pack(fill="x", padx=28, pady=(0, 10))
+        ctk.CTkButton(
+            window, text=self._t("done"), height=40, corner_radius=10,
+            fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"), command=window.destroy,
+        ).pack(fill="x", padx=28, pady=(4, 22))
 
     def _choose_image(self) -> None:
         zenity = shutil.which("zenity")
@@ -2873,7 +3031,7 @@ class ChatApp(ctk.CTk):
     def _paste_image_event(self, _event: Any = None) -> str:
         wl_paste = shutil.which("wl-paste")
         if not wl_paste:
-            messagebox.showwarning(self._t("paste"), "ไม่พบ wl-paste สำหรับอ่านภาพจากคลิปบอร์ด")
+            messagebox.showwarning(self._t("paste"), self._t("paste_missing_tool"))
             return "break"
         try:
             types = subprocess.run(
@@ -2881,7 +3039,7 @@ class ChatApp(ctk.CTk):
             ).stdout.splitlines()
             mime = next((value for value in types if value in {"image/png", "image/jpeg", "image/webp"}), None)
             if not mime:
-                raise RuntimeError("คลิปบอร์ดไม่มีภาพ ใช้ Ctrl+V เพื่อวางข้อความตามปกติ")
+                raise RuntimeError(self._t("clipboard_no_image"))
             suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
             self.state_dir.mkdir(parents=True, exist_ok=True)
             path = self.state_dir / f"clipboard-{int(time.time() * 1000)}{suffix}"
@@ -2912,7 +3070,7 @@ class ChatApp(ctk.CTk):
             return
         recorder = shutil.which("pw-record")
         if not recorder:
-            messagebox.showerror(self._t("voice"), "ไม่พบ pw-record (PipeWire)")
+            messagebox.showerror(self._t("voice"), self._t("voice_recorder_missing"))
             return
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.recording_path = self.state_dir / f"voice-{int(time.time() * 1000)}.wav"
@@ -2930,7 +3088,7 @@ class ChatApp(ctk.CTk):
             return
         speaker = shutil.which("spd-say") or shutil.which("espeak-ng") or shutil.which("espeak")
         if not speaker:
-            messagebox.showerror(self._t("speak"), "ไม่พบ speech-dispatcher หรือ eSpeak")
+            messagebox.showerror(self._t("speak"), self._t("speak_missing"))
             return
         clean = re.sub(r"```.*?```", " ", text, flags=re.S)
         clean = re.sub(r"[*_#`]+", "", clean).strip()[:4000]
@@ -2943,14 +3101,16 @@ class ChatApp(ctk.CTk):
             return
         media = [part for _path, part in self.pending_media]
         if not text and media:
-            text = "ถอดเสียงและตอบข้อความนี้" if any(part["type"] == "input_audio" for part in media) else "อธิบายภาพนี้"
+            text = self._t("transcribe_audio") if any(part["type"] == "input_audio" for part in media) else self._t("describe_image")
         if context_report(self.messages, MODEL_CONTEXT_TOKENS)["percent"] >= 85:
-            self._summarize_context()
+            if not self._summarize_context():
+                self._pending_send = ignore_cache
+                return
         if not self.auto_router_var.get() and not self.model_manager._health(self.api_url_var.get().strip()):
-            messagebox.showwarning("ยังไม่ได้โหลดโมเดล", "เปิดเมนูตั้งค่า เลือกโมเดล แล้วกด ‘โหลดโมเดล’ ก่อนส่งข้อความ")
+            messagebox.showwarning(self._t("model_not_loaded_title"), self._t("model_not_loaded_text"))
             return
         self.input.delete("1.0", "end")
-        media_note = "" if not media else f"\n📎 แนบสื่อ {len(media)} ไฟล์"
+        media_note = "" if not media else self._t("media_attached", count=len(media))
         media_paths = [str(path) for path, _part in self.pending_media]
         self._append(self._t("you"), text + media_note, media_paths=media_paths)
         self.messages.append({"role": "user", "content": text, "media_paths": media_paths})
@@ -3024,14 +3184,14 @@ class ChatApp(ctk.CTk):
         if not model_info:
             return default_client
         if self.model_manager.active_model != model_info:
-            self.events.put(("tool", f"กำลังสลับโมเดลเป็น {model_info.name} สำหรับ {role.capitalize()}..."))
+            self.events.put(("tool", self._t("switching_role_model", role=role.capitalize(), name=model_info.name)))
             self.model_manager.load(model_info, api_url)
             self.events.put(("router_model", str(model_info)))
         return GemmaClient(api_url, model_info.name, default_client.tool_schemas)
 
     def _run_multi_agent(self, api_url: str, default_client: GemmaClient, request_context: str) -> str:
         planner_client = self._get_role_client("planner", api_url, default_client)
-        self.events.put(("tool", "Planner • กำลังวางแผนไฟล์…"))
+        self.events.put(("tool", self._t("planner_working")))
         plan_text = planner_client.plan_project(request_context)
         plan = parse_plan(plan_text)
         explicit = list(dict.fromkeys(re.findall(
@@ -3057,7 +3217,7 @@ class ChatApp(ctk.CTk):
         coder_client = self._get_role_client("coder", api_url, default_client)
         contents: dict[str, str] = {}
         for index, (path, purpose) in enumerate(plan, 1):
-            self.events.put(("tool", f"Coder • {index}/{len(plan)} • {path}"))
+            self.events.put(("tool", self._t("coder_working", index=index, total=len(plan), path=path)))
             current = ""
             try:
                 current = self.tools.read_file(path)
@@ -3088,7 +3248,7 @@ class ChatApp(ctk.CTk):
             raise RuntimeError("Coder ไม่สามารถสร้างไฟล์ที่สมบูรณ์ได้")
 
         for review_round in range(2):
-            self.events.put(("tool", f"Reviewer • ตรวจโครงการรอบ {review_round + 1}/2"))
+            self.events.put(("tool", self._t("reviewer_working", round=review_round + 1)))
             reviewer_client = self._get_role_client("reviewer", api_url, default_client)
             files_text = "\n\n".join(
                 f"--- {path} ---\n{content[:5000]}" for path, content in contents.items()
@@ -3106,7 +3266,7 @@ class ChatApp(ctk.CTk):
             for issue_index, (path, issue) in enumerate(issues, 1):
                 if path not in contents:
                     continue
-                self.events.put(("tool", f"Fixer • {issue_index}/{len(issues)} • {path}"))
+                self.events.put(("tool", self._t("fixer_working", index=issue_index, total=len(issues), path=path)))
                 output = coder_client.code_project_file(
                     request_context, path, "แก้ตาม Reviewer", manifest,
                     current=contents[path], issue=issue,
@@ -3128,11 +3288,11 @@ class ChatApp(ctk.CTk):
         if self.model_manager.active_model and self.model_manager.active_model.name != default_client.model:
             original_model_info = next((m for m in self.model_manager.models() if m.name == default_client.model), None)
             if original_model_info:
-                self.events.put(("tool", f"กำลังโหลดโมเดลหลัก {original_model_info.name} กลับมา..."))
+                self.events.put(("tool", self._t("restoring_main_model", name=original_model_info.name)))
                 self.model_manager.load(original_model_info, api_url)
                 self.events.put(("router_model", str(original_model_info)))
 
-        return "Multi-agent ทำงานเสร็จแล้ว\n" + "\n".join(lines)
+        return self._t("multi_agent_done") + "\n".join(lines)
 
     def _agent_loop(
         self, api_url: str, model: str, multi_agent: bool, auto_router: bool = False,
@@ -3147,7 +3307,7 @@ class ChatApp(ctk.CTk):
                     original_request, self.model_manager.models(), self.model_manager.active_model
                 )
                 if desired and desired != self.model_manager.active_model:
-                    self.events.put(("tool", f"Router กำลังโหลด {desired.name}…"))
+                    self.events.put(("tool", self._t("router_loaded", name=desired.name)))
                     self.model_manager.load(desired, api_url)
                     self.events.put(("router_model", str(desired)))
 
@@ -3158,7 +3318,7 @@ class ChatApp(ctk.CTk):
                     if query_embedding:
                         cached_answer = self.vector_db.search_cache(query_embedding)
                         if cached_answer:
-                            self.events.put(("tool", "⚡ ดึงคำตอบจาก Semantic Cache..."))
+                            self.events.put(("tool", self._t("cache_hit")))
                             self.events.put(("stream_begin", ""))
                             # Stream simulated chunks for UI UX
                             chunk_size = 50
@@ -3177,9 +3337,9 @@ class ChatApp(ctk.CTk):
                 if self.vector_db and not media and 'query_embedding' in locals() and query_embedding:
                     rag_results = self.vector_db.search_rag(query_embedding)
                     if rag_results:
-                        self.events.put(("tool", f"📚 พบข้อมูลอ้างอิง {len(rag_results)} ส่วนจากฐานข้อมูล"))
+                        self.events.put(("tool", self._t("rag_found", count=len(rag_results))))
                         context_str = "\n\n".join([f"[{r['source']}]\n{r['content']}" for r in rag_results])
-                        augmented_prompt = f"ใช้ข้อมูลอ้างอิงต่อไปนี้เพื่อตอบคำถาม ถ้าไม่มีข้อมูลที่เกี่ยวข้องให้ตอบตามความรู้ของคุณ:\n\n{context_str}\n\nคำถาม: {original_request}"
+                        augmented_prompt = self._t("rag_prompt", context=context_str, question=original_request)
                         # Replace the last user message in the session with the augmented prompt
                         for i in range(len(self.messages)-1, -1, -1):
                             if self.messages[i]["role"] == "user":
@@ -3203,12 +3363,18 @@ class ChatApp(ctk.CTk):
                     str(message.get("content", "")) for message in recent_user_messages
                 )
                 if multi_agent:
+                    media_paths = next(
+                        (m.get("media_paths") for m in reversed(self.messages) if m["role"] == "user"),
+                        None,
+                    )
+                    if media and media_paths:
+                        request_context += "\n\n" + self._t("media_note_in_multiagent", paths=", ".join(media_paths))
                     final = self._run_multi_agent(api_url, client, request_context)
                     self.messages.append({"role": "assistant", "content": final})
                     self._save_history()
                     self.events.put(("answer", (final, client.last_completion_tokens, client.last_prompt_tokens)))
                     return
-                self.events.put(("tool", "กำลังสร้างไฟล์โดยตรง…"))
+                self.events.put(("tool", self._t("generating_files")))
                 referenced = re.search(
                     r"(?<![\w.-])([\w.-]+(?:/[\w.-]+)*\.(?:html?|css|js|json|md|txt|py|svg))(?![\w.-])",
                     request_context,
@@ -3235,7 +3401,7 @@ class ChatApp(ctk.CTk):
                     raise RuntimeError("โมเดลไม่ได้ส่งบล็อกไฟล์ที่สมบูรณ์ กรุณาลองสั่งใหม่ให้สั้นลง")
                 results = self._apply_generated_files(files)
                 paths = ", ".join(path for path, _ in files)
-                final = f"สร้างไฟล์ {paths} สำเร็จแล้ว\n" + "\n".join(results)
+                final = self._t("created_files", paths=paths) + "\n".join(results)
                 self.messages.append({"role": "assistant", "content": final})
                 self._save_history()
                 self.events.put(("answer", (final, client.last_completion_tokens, client.last_prompt_tokens)))
@@ -3257,7 +3423,7 @@ class ChatApp(ctk.CTk):
                 call = parse_tool_call(answer)
                 if not call:
                     if looks_like_broken_tool_call(answer):
-                        self.events.put(("tool", "กำลังให้โมเดลแก้คำสั่งเครื่องมือที่รูปแบบไม่ถูกต้อง…"))
+                        self.events.put(("tool", self._t("fixing_tool_json")))
                         # Never retain the large, truncated JSON blob. Keeping
                         # it caused the retry prompt itself to exceed 8K.
                         self.messages.append({
@@ -3271,7 +3437,7 @@ class ChatApp(ctk.CTk):
                         continue
                     if requests_action(original_request) and not action_nudge_used:
                         action_nudge_used = True
-                        self.events.put(("tool", "กำลังกำชับให้โมเดลลงมือสร้างไฟล์…"))
+                        self.events.put(("tool", self._t("nudging_action")))
                         self.messages.append({"role": "assistant", "content": answer})
                         self.messages.append({
                             "role": "user",
@@ -3296,7 +3462,7 @@ class ChatApp(ctk.CTk):
                     self.events.put(("answer", (answer, client.last_completion_tokens, client.last_prompt_tokens)))
                     return
                 name, args = call
-                self.events.put(("tool", f"กำลังใช้ {name}: {json.dumps(args, ensure_ascii=False)}"))
+                self.events.put(("tool", self._t("using_tool", name=name, args=json.dumps(args, ensure_ascii=False))))
                 source = "mcp" if name.startswith("mcp__") else "builtin"
                 started = time.monotonic()
                 try:
@@ -3307,7 +3473,7 @@ class ChatApp(ctk.CTk):
                         if not decision.allowed:
                             result = f"ERROR: {decision.reason}"
                         elif decision.require_approval and not self._request_tool_approval(name, args):
-                            result = "ERROR: ผู้ใช้ไม่อนุญาตให้เรียก MCP tool"
+                            result = self._t("tool_denied_mcp")
                         else:
                             result = self.mcp_manager.call(name, args)
                     elif name == "write_file":
@@ -3326,7 +3492,7 @@ class ChatApp(ctk.CTk):
                     result = f"ERROR: {exc}"
                 if name == "write_file" and not result.startswith("ERROR:"):
                     path = str(args.get("path", "ไฟล์"))
-                    final = f"สร้างไฟล์ {path} สำเร็จแล้ว\n{result}"
+                    final = self._t("created_file", path=path, result=result)
                     # The tool call can contain thousands of tokens of source
                     # code. Do not send it back merely to ask for a summary;
                     # that can overflow the model context after a successful
@@ -3350,19 +3516,18 @@ class ChatApp(ctk.CTk):
                     self.messages.append({"role": "assistant", "content": answer})
                     self.messages.append({
                         "role": "user",
-                        "content": f"ผลจากเครื่องมือ {name}: SUCCESS\n{model_result}\nห้ามทำขั้นตอนเดิมซ้ำ",
+                        "content": self._t("tool_result", name=name, result=model_result),
                     })
-            raise RuntimeError("โมเดลเรียกเครื่องมือเกินจำนวนรอบที่กำหนด")
+            raise RuntimeError(self._t("tool_limit_reached"))
         except GenerationCancelled:
-            self.events.put(("cancelled", "หยุดสร้างคำตอบแล้ว"))
+            self.events.put(("cancelled", self._t("stopped_by_user")))
         except Exception as exc:  # surfaced in the GUI, including connectivity errors
             process = self.model_manager.process
             if isinstance(exc, urllib.error.URLError) and process and process.poll() is not None:
                 self.model_manager.stop()
                 self.events.put((
                     "model_crashed",
-                    "เซิร์ฟเวอร์โมเดลหยุดทำงานขณะประมวลผลสื่อ "
-                    "กรุณากดโหลดโมเดลใหม่แล้วส่งอีกครั้ง",
+                    self._t("model_crashed_hint"),
                 ))
             else:
                 self.events.put(("error", str(exc)))
@@ -3410,20 +3575,20 @@ class ChatApp(ctk.CTk):
                 self.status.configure(text=text[:38] + ("…" if len(text) > 38 else ""))
             elif kind == "error":
                 self._append(self._t("error"), text)
-                messagebox.showerror("เกิดข้อผิดพลาด", text)
+                messagebox.showerror(self._t("error"), text)
             elif kind == "model_crashed":
-                self.model_status_var.set("โมเดลหยุดทำงาน — กรุณาโหลดใหม่")
-                self.status.configure(text="โมเดลหยุดทำงาน", text_color=("#EF4444", "#FF9EAE"))
+                self.model_status_var.set(self._t("model_crashed_status"))
+                self.status.configure(text=self._t("model_crashed_short"), text_color=("#EF4444", "#FF9EAE"))
                 self.status_dot.configure(text_color="#EF4444")
                 self._append(self._t("error"), text)
                 messagebox.showerror(self._t("error"), text)
             elif kind == "model_loaded":
                 model_name, profile_text = text
-                self.model_status_var.set(f"กำลังใช้งาน: {model_name}\n{profile_text}")
-                self.status.configure(text="โมเดลพร้อมใช้งาน", text_color=("#10B981", "#63c174"))
+                self.model_status_var.set(self._t("using_model", name=model_name, profile=profile_text))
+                self.status.configure(text=self._t("model_ready"), text_color=("#10B981", "#63c174"))
                 self.status_dot.configure(text_color="#43D19E")
             elif kind == "model_downloaded":
-                self.model_status_var.set(f"ดาวน์โหลดแล้ว: {Path(text).name}")
+                self.model_status_var.set(self._t("downloaded_done", name=Path(text).name))
                 choices = self._model_choices()
                 self.selected_model_var.set(Path(text).name)
                 if hasattr(self, "model_menu") and self.model_menu.winfo_exists():
@@ -3435,29 +3600,29 @@ class ChatApp(ctk.CTk):
             elif kind == "download_progress":
                 if hasattr(self, "download_progress") and self.download_progress.winfo_exists():
                     self.download_progress.set(float(text) / 100)
-                self.model_status_var.set(f"กำลังดาวน์โหลด… {int(text)}%")
+                self.model_status_var.set(self._t("downloading_progress", percent=int(text)))
             elif kind == "benchmark":
                 self.model_status_var.set(f"Benchmark: {text}")
             elif kind == "router_model":
                 self.selected_model_var.set(Path(text).name)
-                self.model_status_var.set(f"Router เลือก: {Path(text).name}")
+                self.model_status_var.set(self._t("router_chose", name=Path(text).name))
             elif kind == "model_error":
                 self.model_status_var.set(str(text))
-                self.status.configure(text="โมเดลมีข้อผิดพลาด", text_color=("#EF4444", "#FF9EAE"))
-                messagebox.showerror("จัดการโมเดลไม่สำเร็จ", str(text))
+                self.status.configure(text=self._t("model_error_short"), text_color=("#EF4444", "#FF9EAE"))
+                messagebox.showerror(self._t("model_manage_failed"), str(text))
             elif kind == "cancelled":
                 if self.stream_widgets:
-                    self._finish_stream(self.stream_buffer + "\n\n[หยุดโดยผู้ใช้]", estimate_tokens(self.stream_buffer), {
+                    self._finish_stream(self.stream_buffer + self._t("stopped_by_user"), estimate_tokens(self.stream_buffer), {
                         "elapsed": time.monotonic() - self.request_started,
                         "model": Path(self.model_manager.active_model).name if self.model_manager.active_model else "local",
                     })
-                self.status.configure(text="หยุดแล้ว", text_color=self.MUTED)
+                self.status.configure(text=self._t("stopped"), text_color=self.MUTED)
             elif kind == "done":
                 self.busy = False
                 self.send_button.configure(state="normal")
                 self.stop_button.grid_remove()
                 self.send_button.grid(row=0, column=1, padx=(0, 12), pady=12)
-                self.status.configure(text="พร้อมใช้งาน", text_color=("#10B981", "#63c174"))
+                self.status.configure(text=self._t("idle"), text_color=("#10B981", "#63c174"))
                 self._notify_finished()
         self.after(80, self._poll_events)
 

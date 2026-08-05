@@ -38,7 +38,11 @@ cd ~/LocalForge-AI
 - Project Explorer พร้อมเปิด/rename/delete/Terminal/Browser
 - หลายบทสนทนา ค้นหา ปักหมุด แก้ไข สร้างใหม่ ลบ และ export
 - Context Inspector พร้อม token meter, trim และ summary
-- Markdown highlighting, copy/code-copy, UI ไทย/English/中文/日本語, theme และ UI scaling
+- Markdown highlighting, copy/code-copy, UI ไทย/English/中文/日本語
+- เปลี่ยนภาษา/ธีมแบบทันทีผ่านหน้าต่างตั้งค่า (ไม่ต้องรีสตาร์ท)
+- จัดการ RAG และ Semantic Cache (ดูจำนวน ลบทั้งหมด) ผ่านปุ่มในแถบข้าง
+- จำ workspace ที่เลือกไว้ พร้อมย้อนคืนไปเปิดครั้งต่อไปโดยอัตโนมัติ
+- theme และ UI scaling
 - CPU/RAM/GPU/VRAM/temperature monitor และ desktop notification
 - โปรไฟล์ Gemma 4 E4B สำหรับ GPU 8 GB: GPU offload ทุก layer, context 8K,
   KV cache Q8 และสูงสุด 12 CPU threads (แสดงชื่อโปรไฟล์หลังโหลดโมเดล)

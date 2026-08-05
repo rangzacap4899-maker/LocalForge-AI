@@ -1,7 +1,6 @@
 import json
 import math
 import sqlite3
-import threading
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -104,46 +103,16 @@ class VectorDB:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
-class TaskPlanner:
-    def __init__(self, generate_fn):
-        self.generate_fn = generate_fn
+    def counts(self) -> tuple[int, int]:
+        with sqlite3.connect(self.db_path) as conn:
+            rag = conn.execute("SELECT COUNT(*) FROM rag_chunks").fetchone()[0]
+            cache = conn.execute("SELECT COUNT(*) FROM semantic_cache").fetchone()[0]
+        return rag, cache
 
-    def execute_agentic_workflow(self, prompt: str, on_update) -> str:
-        # Step 1: Planning
-        on_update("กำลังวางแผน (Planning)...\\n")
-        plan_prompt = f"Break down this task into a JSON array of sub-tasks. Output ONLY valid JSON: {prompt}"
-        plan_response = self.generate_fn([{"role": "user", "content": plan_prompt}], enable_tools=False, disable_stream=True)
-        try:
-            # Extract JSON if markdown wrapped
-            if "```" in plan_response:
-                import re
-                match = re.search(r"```(?:json)?\n(.*?)\n```", plan_response, re.S)
-                if match:
-                    plan_response = match.group(1)
-            subtasks = json.loads(plan_response)
-            if not isinstance(subtasks, list):
-                subtasks = [prompt]
-        except:
-            subtasks = [prompt] # Fallback
-            
-        # Step 2: Execution & Evaluation
-        results = []
-        for i, task in enumerate(subtasks):
-            on_update(f"กำลังทำขั้นตอนที่ {i+1}/{len(subtasks)}: {task}\\n")
-            task_response = self.generate_fn([{"role": "user", "content": str(task)}], enable_tools=True, disable_stream=True)
-            results.append(f"Result of {task}: {task_response}")
-            
-        # Step 3: Synthesis
-        on_update("กำลังสรุปผล (Synthesizing)...\\n")
-        final_prompt = f"Based on these results, provide the final answer to: {prompt}\\n\\nResults:\\n" + "\\n".join(results)
-        return self.generate_fn([{"role": "user", "content": final_prompt}], enable_tools=False, disable_stream=True)
+    def clear_rag(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM rag_chunks")
 
-def estimate_complexity(prompt: str) -> int:
-    score = 1
-    complex_keywords = ["build", "write", "code", "explain", "analyze", "compare", "system", "architecture"]
-    if len(prompt.split()) > 30:
-        score += 3
-    for word in complex_keywords:
-        if word in prompt.lower():
-            score += 2
-    return min(10, score)
+    def clear_cache(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM semantic_cache")

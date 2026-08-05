@@ -21,10 +21,14 @@ LocalForge AI คือแอปเดสก์ท็อปสำหรับใ
 - ค้นเว็บและอ่านหน้าเว็บสาธารณะผ่าน HTTP/HTTPS
 - จัดเก็บ ค้นหา ปักหมุด ส่งออก และลบบทสนทนา
 - Context Inspector, token meter, markdown highlighting และปุ่มคัดลอก
-- UI รองรับไทย, English, 中文 และ日本語 พร้อมฟอนต์ตามภาษา
-- รองรับธีมมืด/สว่างและการปรับขนาด UI
+- UI รองรับไทย, English, 中文 และ日本語 พร้อมฟอนต์ตามภาษา และเปลี่ยนภาษาแบบทันที
+- รองรับธีมมืด/สว่างและการปรับขนาด UI เปลี่ยนแล้วบันทึกทันที
+- จัดการ RAG และ Semantic Cache ผ่านหน้าต่างจัดการ (ลบ chunks/cache ได้ทันที)
+- จำพาธ workspace ที่เลือกไว้เพื่อเปิดครั้งต่อไปโดยอัตโนมัติ
+- Multi-agent รองรับการแนบภาพ/เสียงเป็นข้อมูลอ้างอิง
 - แสดงสถานะ CPU, RAM, GPU, VRAM และอุณหภูมิ
 - เชื่อม local MCP servers ผ่าน stdio พร้อม Permission Center และ audit hooks
+- มีสคริปต์ `install.sh` ติดตั้งแพ็กเกจระบบ สร้าง `.venv` และเมนูแอปให้อัตโนมัติ
 
 ## ความต้องการของระบบ
 
@@ -60,6 +64,17 @@ Gemma 4 E4B รองรับภาพและเสียงใน LocalForge
 git clone https://github.com/rangzacap4899-maker/LocalForge-AI.git
 cd LocalForge-AI
 ```
+
+### 0. ติดตั้งอัตโนมัติ (ทางเลือก)
+
+บน Fedora/Bazzite (รองรับ apt/pacman เช่นกัน) รันสคริปต์เดียวเพื่อติดตั้ง
+แพ็กเกจระบบ สร้าง `.venv` และสร้างเมนูแอป:
+
+```bash
+./install.sh
+```
+
+ข้ามขั้นตอนติดตั้งแพ็กเกจระบบได้ด้วย `./install.sh --skip-deps`
 
 ### 2. เตรียม Python
 
