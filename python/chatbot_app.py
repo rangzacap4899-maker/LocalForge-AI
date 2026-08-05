@@ -1139,6 +1139,7 @@ class ChatApp(ctk.CTk):
 
     def __init__(self) -> None:
         super().__init__()
+        self.withdraw()
         self.title("LocalForge AI — Local AI Workspace")
         self.geometry("1120x760")
         self.minsize(880, 620)
@@ -1228,6 +1229,12 @@ class ChatApp(ctk.CTk):
         self._build_ui()
         self.after(80, self._poll_events)
         self.after(1000, self._update_system_monitor)
+        self.after(0, self._present_window)
+
+    def _present_window(self) -> None:
+        self.update_idletasks()
+        self.deiconify()
+        self.lift()
 
     def _t(self, key: str, **values: Any) -> str:
         return translate(self._lang_code, key, **values)
