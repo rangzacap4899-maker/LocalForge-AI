@@ -226,4 +226,8 @@ LocalForge-AI/
 - [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) สำหรับส่วนติดต่อผู้ใช้
 - เจ้าของโมเดลแต่ละรายสำหรับไฟล์ GGUF ที่เลือกใช้งาน
 
-Repository นี้ยังไม่ได้ประกาศ license สำหรับซอร์สของ LocalForge AI
+## สัญญาอนุญาต (License)
+
+ซอร์สของ LocalForge AI เผยแพร่ภายใต้สัญญาอนุญาต MIT — ดูรายละเอียดใน [LICENSE](LICENSE)
+ส่วนที่สืบทอดมาจาก google/gemma.cpp (เช่น Python bindings ที่ยังไม่รวมอยู่ในรีลีส)
+ใช้ Apache License 2.0 และ BSD-3-Clause ตามต้นทาง
