@@ -3,10 +3,10 @@ Type=Application
 Version=1.0
 Name=LocalForge AI
 Comment=ผู้ช่วย AI ภายในเครื่องสำหรับสนทนา สร้างไฟล์ และค้นเว็บ
-# This checked-in file is a template. Run ./install.sh to generate a portable
-# user-specific entry with the correct absolute application path.
+# This checked-in file is used as-is by the AppImage build (packaging/make_appimage.sh).
+# The installed-runner uses ./install.sh which generates a user-specific entry.
 Exec=localforge-ai
-Icon=system-help
+Icon=localforge-ai
 Terminal=false
 Categories=Utility;Development;
 StartupNotify=true

@@ -136,6 +136,33 @@ mkdir -p ~/.local/share/applications
 ./install.sh --skip-deps
 ```
 
+## แพ็กเกจ AppImage (แบบพกพา)
+
+สร้าง AppImage แบบพกพาที่รวม Python + Tk + ตัวแอป + `llama-server` (Vulkan โดย
+ค่าเริ่มต้น) ไว้ในไฟล์เดียว ไม่ต้องมี compiler:
+
+```bash
+./packaging/make_appimage.sh              # ใช้ Vulkan build
+./packaging/make_appimage.sh --cpu        # ใช้ CPU build
+./packaging/make_appimage.sh --llama-tag b10312   # ระบุเวอร์ชัน llama.cpp
+```
+
+ผลลัพธ์อยู่ที่ `packaging/build-appimage/dist/LocalForge-AI-<วันที่>-x86_64.AppImage`
+รันได้โดยตรง หรือเพิ่มลงเมนูด้วย AppImageLauncher:
+
+```bash
+chmod +x LocalForge-AI-*.AppImage
+./LocalForge-AI-*.AppImage
+```
+
+หมายเหตุ:
+
+- ระบบที่ไม่มี FUSE2 ให้ใช้ `APPIMAGE_EXTRACT_AND_RUN=1 ./LocalForge-AI-*.AppImage`
+- โมเดลที่ดาวน์โหลดและข้อมูลผู้ใช้เก็บไว้ที่ `~/.local/share/localforge-ai/`
+  (ไม่ถูกเขียนภายใน AppImage ซึ่งเป็นแบบอ่านอย่างเดียว)
+- เปลี่ยน endpoint เซิร์ฟเวอร์ได้ด้วย `LOCALFORGE_API_URL` หรือระบุ binary อื่น
+  ด้วย `LLAMA_SERVER_BIN`
+
 ## การใช้งาน
 
 1. เลือก workspace จากแถบด้านซ้าย
