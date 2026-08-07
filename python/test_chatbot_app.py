@@ -42,6 +42,7 @@ from chatbot_app import (
     inference_profile,
     media_content,
     with_media,
+    visible_reasoning_response,
 )
 
 
@@ -56,6 +57,17 @@ class ToolsTest(unittest.TestCase):
     def test_write_and_read(self):
         self.tools.write_file("notes/hello.txt", "สวัสดี")
         self.assertEqual(self.tools.read_file("notes/hello.txt"), "สวัสดี")
+
+    def test_web_tool_rejects_private_network(self):
+        with self.assertRaises(ToolError):
+            Tools._download("http://127.0.0.1/metadata", 100)
+
+    def test_visible_reasoning_response_keeps_only_final_answer(self):
+        self.assertEqual(
+            visible_reasoning_response("คิดภายใน\n</think>\n<file path=\"index.html\">x</file>"),
+            '<file path="index.html">x</file>',
+        )
+        self.assertEqual(visible_reasoning_response("<think>คิดอย่างเดียว"), "")
 
     def test_cannot_escape_workspace(self):
         with self.assertRaises(ToolError):

@@ -6,6 +6,7 @@ from pathlib import Path
 from localforge_core import (
     ConversationStore,
     FileTransaction,
+    atomic_write_text,
     choose_model,
     context_report,
     inspect_model,
@@ -29,6 +30,12 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(choose_model("สร้างเว็บด้วย JavaScript", [gemma, coder]), coder)
         self.assertEqual(choose_model("สวัสดี", [gemma, coder]), gemma)
         self.assertEqual(choose_model("สวัสดี", [gemma, coder], coder), coder)
+
+    def test_atomic_write_replaces_complete_private_file(self):
+        target = self.root / "state.json"
+        atomic_write_text(target, '{"ok": true}')
+        self.assertEqual(target.read_text(encoding="utf-8"), '{"ok": true}')
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
     def test_model_metadata(self):
         model = self.root / "Qwen3-8B-Q4_K_M.gguf"

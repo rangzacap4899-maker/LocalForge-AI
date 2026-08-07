@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from localforge_core import atomic_write_text
+
 
 PROTOCOL_VERSION = "2025-11-25"
 MAX_MCP_SERVERS = 12
@@ -196,10 +198,8 @@ class MCPManager:
             self.configs = []
 
     def save(self) -> None:
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.config_path.write_text(
+        atomic_write_text(self.config_path,
             json.dumps({"version": 1, "servers": [asdict(item) for item in self.configs]}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def add(self, name: str, command_text: str, permission: str = "ask") -> MCPServerConfig:

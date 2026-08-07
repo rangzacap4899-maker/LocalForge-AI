@@ -6,13 +6,16 @@ from __future__ import annotations
 import html
 import hashlib
 import base64
+import ipaddress
 import json
 import mimetypes
 import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -30,6 +33,7 @@ import customtkinter as ctk
 from localforge_core import (
     ConversationStore,
     FileTransaction,
+    atomic_write_text,
     choose_model,
     context_report,
     inspect_model,
@@ -328,12 +332,42 @@ class Tools:
         return f"เขียนไฟล์ {target.relative_to(self.workspace)} แล้ว ({len(content)} ตัวอักษร)"
 
     @staticmethod
-    def _download(url: str, limit: int) -> str:
+    def _validate_public_url(url: str) -> None:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme not in {"http", "https"}:
             raise ToolError("รองรับเฉพาะ URL แบบ http/https")
+        hostname = parsed.hostname
+        if not hostname or parsed.username or parsed.password:
+            raise ToolError("URL ไม่ปลอดภัยหรือไม่มี hostname")
+        try:
+            addresses = {
+                info[4][0]
+                for info in socket.getaddrinfo(hostname, parsed.port, type=socket.SOCK_STREAM)
+            }
+        except (OSError, ValueError) as exc:
+            raise ToolError(f"ไม่สามารถตรวจสอบปลายทาง URL: {exc}") from exc
+        if not addresses or any(
+            (address := ipaddress.ip_address(value)).is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+            for value in addresses
+        ):
+            raise ToolError("ไม่อนุญาตให้เรียก URL ภายในหรือ private network")
+
+    @staticmethod
+    def _download(url: str, limit: int) -> str:
+        Tools._validate_public_url(url)
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(request, timeout=15) as response:
+        class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+                Tools._validate_public_url(newurl)
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        opener = urllib.request.build_opener(SafeRedirectHandler)
+        with opener.open(request, timeout=15) as response:
             raw = response.read(limit + 1)
             if len(raw) > limit:
                 raw = raw[:limit]
@@ -468,6 +502,7 @@ class GemmaClient:
         cancel_event: threading.Event | None,
     ) -> str:
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
             try:
                 response.fp.raw._sock.settimeout(STREAM_IDLE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
@@ -506,13 +541,23 @@ class GemmaClient:
                 choice = choices[0]
                 if choice.get("finish_reason") is not None:
                     break
-                piece = choice.get("delta", {}).get("content") or ""
+                delta = choice.get("delta", {}) or {}
+                piece = delta.get("content") or ""
+                reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning") or ""
                 if piece:
                     parts.append(piece)
                     on_token(piece)
+                if reasoning_piece:
+                    reasoning_parts.append(reasoning_piece)
+        result = "".join(parts).strip()
+        if not result and reasoning_parts:
+            fallback = visible_reasoning_response("".join(reasoning_parts))
+            if fallback:
+                result = fallback
+                on_token(fallback)
         if not self.last_completion_tokens:
-            self.last_completion_tokens = estimate_tokens("".join(parts))
-        return "".join(parts).strip()
+            self.last_completion_tokens = estimate_tokens(result)
+        return result
 
     def _generate_openai(
         self, messages: list[dict[str, Any]], enable_tools: bool,
@@ -566,7 +611,9 @@ class GemmaClient:
                 return json.dumps(
                     {"tool": function["name"], "args": arguments}, ensure_ascii=False
                 )
-            return (message.get("content") or "").strip()
+            return visible_reasoning_response(
+                message.get("content") or message.get("reasoning_content") or ""
+            )
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"รูปแบบคำตอบจาก llama.cpp ไม่ถูกต้อง: {data}") from exc
 
@@ -613,7 +660,10 @@ class GemmaClient:
         self.last_completion_tokens = int(data.get("usage", {}).get("completion_tokens", 0) or 0)
         self.last_prompt_tokens = int(data.get("usage", {}).get("prompt_tokens", 0) or 0)
         try:
-            return (data["choices"][0]["message"].get("content") or "").strip()
+            message = data["choices"][0]["message"]
+            return visible_reasoning_response(
+                message.get("content") or message.get("reasoning_content") or ""
+            )
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"รูปแบบคำตอบสร้างไฟล์ไม่ถูกต้อง: {data}") from exc
 
@@ -746,6 +796,17 @@ def parse_tool_call(text: str) -> tuple[str, dict[str, Any]] | None:
     if isinstance(value, dict) and isinstance(value.get("tool"), str) and isinstance(value.get("args"), dict):
         return value["tool"], value["args"]
     return None
+
+
+def visible_reasoning_response(text: str) -> str:
+    """Remove hidden Qwen/DeepSeek reasoning while preserving the final answer."""
+    value = str(text or "").strip()
+    closing = list(re.finditer(r"</think>\s*", value, re.I))
+    if closing:
+        return value[closing[-1].end():].strip()
+    if re.search(r"<file\s+path=|```", value, re.I):
+        return value
+    return value if not re.search(r"<think>|\b(reasoning|analysis):", value, re.I) else ""
 
 
 def looks_like_broken_tool_call(text: str) -> bool:
@@ -1119,18 +1180,308 @@ class ToolTip:
             tw.destroy()
 
 
+class ContextDonutChart(ctk.CTkFrame):
+    """Circular ring canvas chart matching the reference context meter UI."""
+    def __init__(self, parent: Any, **kwargs: Any):
+        super().__init__(parent, fg_color="transparent", **kwargs)
+        canvas_bg = self._apply_appearance_mode(parent.cget("fg_color"))
+        if canvas_bg == "transparent":
+            canvas_bg = "#151C2C"
+        self.canvas = tk.Canvas(self, width=106, height=106, bg=canvas_bg, highlightthickness=0)
+        self.canvas.pack(side="left", padx=(4, 10))
+
+        legend = ctk.CTkFrame(self, fg_color="transparent")
+        legend.pack(side="left", fill="both", expand=True)
+
+        self.code_label = ctk.CTkLabel(legend, text="● Code  0K", text_color="#3B82F6", font=ctk.CTkFont(size=9, weight="bold"), anchor="w")
+        self.code_label.pack(fill="x", pady=2)
+        self.files_label = ctk.CTkLabel(legend, text="● Files  0K", text_color="#38BDF8", font=ctk.CTkFont(size=9, weight="bold"), anchor="w")
+        self.files_label.pack(fill="x", pady=2)
+        self.history_label = ctk.CTkLabel(legend, text="● History  0K", text_color="#8B5CF6", font=ctk.CTkFont(size=9, weight="bold"), anchor="w")
+        self.history_label.pack(fill="x", pady=2)
+
+        self.set_values(used=0, maximum=8192, percent=0)
+
+    def set_values(self, used: int, maximum: int, percent: float) -> None:
+        self.canvas.delete("all")
+        bg_color = "#151C2C" if ctk.get_appearance_mode().lower() == "dark" else "#FFFFFF"
+        ring_bg = "#22314E" if ctk.get_appearance_mode().lower() == "dark" else "#E2E8F0"
+        self.canvas.configure(bg=bg_color)
+
+        # Larger ring: 8,8 → 98,98 (center = 53,53)
+        self.canvas.create_arc(8, 8, 98, 98, start=0, extent=359.9, style="arc", outline=ring_bg, width=10)
+
+        if used > 0 and maximum > 0:
+            total_angle = min(360, (used / maximum) * 360)
+            code_angle = total_angle * 0.6
+            files_angle = total_angle * 0.25
+            hist_angle = total_angle * 0.15
+
+            start = 90
+            if code_angle > 0:
+                self.canvas.create_arc(8, 8, 98, 98, start=start, extent=-code_angle, style="arc", outline="#3B82F6", width=10)
+                start -= code_angle
+            if files_angle > 0:
+                self.canvas.create_arc(8, 8, 98, 98, start=start, extent=-files_angle, style="arc", outline="#38BDF8", width=10)
+                start -= files_angle
+            if hist_angle > 0:
+                self.canvas.create_arc(8, 8, 98, 98, start=start, extent=-hist_angle, style="arc", outline="#8B5CF6", width=10)
+
+        text_color = "#F1F5F9" if ctk.get_appearance_mode().lower() == "dark" else "#0F172A"
+        sub_color = "#8E9BBA" if ctk.get_appearance_mode().lower() == "dark" else "#64748B"
+        self.canvas.create_text(53, 45, text=f"{percent:.0f}%", fill=text_color, font=("Noto Sans", 11, "bold"))
+        used_k = f"{used/1000:.1f}K" if used >= 1000 else str(used)
+        max_k = f"{maximum/1000:.0f}K" if maximum >= 1000 else str(maximum)
+        self.canvas.create_text(53, 61, text=f"{used_k}/{max_k}", fill=sub_color, font=("Noto Sans", 8))
+
+        code_k = f"{used*0.6/1000:.1f}K" if used > 0 else "0K"
+        files_k = f"{used*0.25/1000:.1f}K" if used > 0 else "0K"
+        hist_k = f"{used*0.15/1000:.1f}K" if used > 0 else "0K"
+        self.code_label.configure(text=f"● Code  {code_k}")
+        self.files_label.configure(text=f"● Files  {files_k}")
+        self.history_label.configure(text=f"● History  {hist_k}")
+
+
+class CodeEditorPanel(ctk.CTkFrame):
+    """Full-featured embedded IDE code editor panel with file tabs & line numbers."""
+    def __init__(self, parent: Any, app: Any, **kwargs: Any):
+        super().__init__(parent, fg_color=app.PANEL, corner_radius=10, border_width=1, border_color=app.BORDER, **kwargs)
+        self.app = app
+        self.open_files: dict[str, Path] = {}
+        self.active_tab: str | None = None
+
+        self.top_bar = ctk.CTkFrame(self, height=36, fg_color=app.SIDEBAR, corner_radius=0)
+        self.top_bar.pack(fill="x", side="top")
+
+        self.tab_container = ctk.CTkFrame(self.top_bar, fg_color="transparent")
+        self.tab_container.pack(side="left", fill="x", expand=True, padx=4, pady=2)
+
+        self.actions_container = ctk.CTkFrame(self.top_bar, fg_color="transparent")
+        self.actions_container.pack(side="right", padx=6, pady=2)
+
+        self.save_btn = ctk.CTkButton(
+            self.actions_container, text="▣ " + app._t("save_file"), width=90, height=24, corner_radius=6,
+            fg_color=app.ACCENT, hover_color=app.ACCENT_HOVER, font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.save_active_file
+        )
+        self.save_btn.pack(side="left", padx=2)
+
+        self.ask_ai_btn = ctk.CTkButton(
+            self.actions_container, text="✦ " + app._t("ask_ai_file"), width=130, height=24, corner_radius=6,
+            fg_color=app.ACCENT_SUBTLE, hover_color=app.PANEL_HOVER, text_color=app.ACCENT,
+            border_width=1, border_color=app.ACCENT, font=ctk.CTkFont(size=10, weight="bold"),
+            command=self.ask_ai_about_active_file
+        )
+        self.ask_ai_btn.pack(side="left", padx=2)
+
+        editor_container = ctk.CTkFrame(self, fg_color="transparent")
+        editor_container.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.line_numbers = tk.Text(
+            editor_container, width=4, font=("Noto Sans Mono", 11),
+            bg=app._resolve_color(app.SIDEBAR), fg=app._resolve_color(app.MUTED), bd=0, relief="flat", state="disabled"
+        )
+        self.line_numbers.pack(side="left", fill="y", padx=(2, 0))
+
+        self.editor_textbox = ctk.CTkTextbox(
+            editor_container, wrap="none", font=ctk.CTkFont(family="Noto Sans Mono", size=12),
+            fg_color=app.BG, border_width=0, text_color=app.TEXT
+        )
+        self.editor_textbox.pack(side="right", fill="both", expand=True)
+
+        self.editor_textbox.bind("<KeyRelease>", self._on_key_release)
+        self.editor_textbox.bind("<Return>", self._on_enter)
+        self.editor_textbox.bind("<Key>", self._on_key)
+        self.editor_textbox.bind("<Control-s>", lambda _e: (self.save_active_file(), "break")[1])
+        app._bind_edit_menu(self.editor_textbox, readonly=False)
+
+        # Syntax highlighting tags
+        self.editor_textbox.tag_config("keyword", foreground=app._resolve_color(app.ACCENT))
+        self.editor_textbox.tag_config("string", foreground="#10B981") # Green
+        self.editor_textbox.tag_config("comment", foreground=app._resolve_color(app.MUTED))
+
+    def open_file(self, path: Path) -> None:
+        path = path.resolve()
+        tab_id = path.name
+        self.open_files[tab_id] = path
+        self.active_tab = tab_id
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            content = f"# Error reading file: {exc}"
+
+        self.editor_textbox.delete("1.0", "end")
+        self.editor_textbox.insert("1.0", content)
+        self._update_line_numbers()
+        self._highlight_syntax()
+        self._render_tabs()
+
+    def close_file(self, tab_id: str) -> None:
+        if tab_id in self.open_files:
+            del self.open_files[tab_id]
+        if self.active_tab == tab_id:
+            self.active_tab = list(self.open_files.keys())[-1] if self.open_files else None
+            if self.active_tab:
+                # Silently open the next tab without triggering re-render yet
+                path = self.open_files[self.active_tab]
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    content = f"# Error reading file: {exc}"
+                self.editor_textbox.delete("1.0", "end")
+                self.editor_textbox.insert("1.0", content)
+                self._update_line_numbers()
+            else:
+                self.editor_textbox.delete("1.0", "end")
+                self._update_line_numbers()
+        self._render_tabs()
+
+    def _render_tabs(self) -> None:
+        for child in self.tab_container.winfo_children():
+            child.destroy()
+
+        for tab_id, path in self.open_files.items():
+            is_active = tab_id == self.active_tab
+            
+            tab_frame = ctk.CTkFrame(
+                self.tab_container, height=28, corner_radius=6,
+                fg_color=self.app.PANEL if is_active else "transparent",
+                border_width=1 if is_active else 0, border_color=self.app.BORDER if is_active else "transparent"
+            )
+            tab_frame.pack(side="left", padx=2, pady=1, fill="y")
+            
+            btn = ctk.CTkButton(
+                tab_frame, text=f"▤ {tab_id}", height=26, corner_radius=6, width=10,
+                fg_color="transparent", hover_color=self.app.PANEL_HOVER, 
+                text_color=self.app.ACCENT if is_active else self.app.MUTED,
+                font=ctk.CTkFont(size=11, weight="bold" if is_active else "normal"),
+                command=lambda p=path: self.open_file(p)
+            )
+            btn.pack(side="left", padx=(4, 0), pady=1)
+            
+            close_btn = ctk.CTkButton(
+                tab_frame, text="×", width=22, height=22, corner_radius=6,
+                fg_color="transparent", hover_color="#EF4444", text_color=self.app.MUTED,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda tid=tab_id: self.close_file(tid)
+            )
+            close_btn.pack(side="right", padx=(0, 2), pady=1)
+
+    def save_active_file(self) -> None:
+        if not self.active_tab or self.active_tab not in self.open_files:
+            return
+        path = self.open_files[self.active_tab]
+        content = self.editor_textbox.get("1.0", "end-1c")
+        try:
+            atomic_write_text(path, content)
+            self.save_btn.configure(text=self.app._t("file_saved", name=path.name))
+            self.after(1500, lambda: self.save_btn.configure(text=self.app._t("save_file")))
+            self.app._refresh_project_file_list()
+        except Exception as exc:
+            messagebox.showerror(self.app._t("error"), str(exc))
+
+    def ask_ai_about_active_file(self) -> None:
+        if not self.active_tab or self.active_tab not in self.open_files:
+            return
+        path = self.open_files[self.active_tab]
+        content = self.editor_textbox.get("1.0", "end-1c")[:2000]
+        prompt = f"วิเคราะห์และปรับปรุงไฟล์ `{path.name}`:\n```\n{content}\n```"
+        self.app.input.delete("1.0", "end")
+        self.app.input.insert("1.0", prompt)
+        self.app._set_view_mode("split")
+
+    def _on_key_release(self, _event: Any = None) -> None:
+        self._update_line_numbers()
+        if hasattr(self, "_highlight_timer"):
+            self.after_cancel(self._highlight_timer)
+        self._highlight_timer = self.after(300, self._highlight_syntax)
+
+    def _on_enter(self, event: Any) -> str | None:
+        line_num = self.editor_textbox.index("insert").split(".")[0]
+        line_text = self.editor_textbox.get(f"{line_num}.0", f"{line_num}.end")
+        indent = ""
+        for char in line_text:
+            if char in (" ", "\t"):
+                indent += char
+            else:
+                break
+        if line_text.rstrip().endswith(":"):
+            indent += "    "
+        self.editor_textbox.insert("insert", "\n" + indent)
+        self._update_line_numbers()
+        self.editor_textbox.see("insert")
+        return "break"
+
+    def _on_key(self, event: Any) -> str | None:
+        char = event.char
+        if not char:
+            return None
+        pairs = {"(": ")", "[": "]", "{": "}", '"': '"', "'": "'"}
+        
+        # Step over existing closing brackets instead of duplicating
+        if char in pairs.values():
+            next_char = self.editor_textbox.get("insert", "insert+1c")
+            if next_char == char:
+                self.editor_textbox.mark_set("insert", "insert+1c")
+                return "break"
+                
+        # Auto-insert closing brackets
+        if char in pairs:
+            self.editor_textbox.insert("insert", char + pairs[char])
+            self.editor_textbox.mark_set("insert", "insert-1c")
+            return "break"
+            
+        return None
+
+    def _highlight_syntax(self) -> None:
+        if not self.active_tab:
+            return
+            
+        text = self.editor_textbox.get("1.0", "end-1c")
+        self.editor_textbox.tag_remove("keyword", "1.0", "end")
+        self.editor_textbox.tag_remove("string", "1.0", "end")
+        self.editor_textbox.tag_remove("comment", "1.0", "end")
+        
+        import re
+        kw_pattern = r'\b(def|class|if|elif|else|for|while|try|except|finally|with|as|return|yield|import|from|pass|break|continue|and|or|not|is|in|lambda|global|nonlocal|assert|del|True|False|None)\b'
+        for match in re.finditer(kw_pattern, text):
+            self.editor_textbox.tag_add("keyword", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
+            
+        str_pattern = r'(\'[^\']*\'|\"[^\"]*\")'
+        for match in re.finditer(str_pattern, text):
+            self.editor_textbox.tag_add("string", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
+            
+        comment_pattern = r'(#.*)'
+        for match in re.finditer(comment_pattern, text):
+            self.editor_textbox.tag_add("comment", f"1.0+{match.start()}c", f"1.0+{match.end()}c")
+
+    def _update_line_numbers(self) -> None:
+        text = self.editor_textbox.get("1.0", "end-1c")
+        lines = max(1, text.count("\n") + 1)
+        line_str = "\n".join(str(i) for i in range(1, lines + 1))
+        self.line_numbers.configure(state="normal")
+        self.line_numbers.delete("1.0", "end")
+        self.line_numbers.insert("1.0", line_str)
+        self.line_numbers.configure(state="disabled")
+
+
 class ChatApp(ctk.CTk):
-    BG = ("#F8FAFC", "#0B0F19")
-    SIDEBAR = ("#E2E8F0", "#111827")
-    PANEL = ("#FFFFFF", "#151D2E")
-    PANEL_HOVER = ("#F1F5F9", "#1B263B")
-    BORDER = ("#94A3B8", "#22304A")
-    TEXT = ("#0F172A", "#F3F6FC")
-    MUTED = ("#475569", "#8CA0BE")
+    BG = ("#F8FAFC", "#090D16")
+    SIDEBAR = ("#E2E8F0", "#0F1420")
+    PANEL = ("#FFFFFF", "#151C2C")
+    PANEL_HOVER = ("#F1F5F9", "#1C273D")
+    BORDER = ("#94A3B8", "#222E45")
+    TEXT = ("#0F172A", "#F1F5F9")
+    MUTED = ("#475569", "#8E9BBA")
     ACCENT = ("#6D28D9", "#7C5CFC")
-    ACCENT_HOVER = ("#5B21B6", "#6246CC")
-    USER_BUBBLE = ("#4E3FBE", "#4E3FBE")
-    BOT_BUBBLE = ("#F1F5F9", "#172238")
+    ACCENT_HOVER = ("#5B21B6", "#6B47EC")
+    USER_BUBBLE = ("#EDE9FE", "#1C1B33")   # soft indigo tint for user bubble
+    BOT_BUBBLE = ("#FFFFFF", "#131A2B")
+    DOCK = ("#CBD5E1", "#080C14")
+    ACCENT_SUBTLE = ("#EDE9FE", "#1E1640")  # very subtle accent bg
+    SUCCESS = "#10B981"
+    WARNING = "#F59E0B"
+    DANGER = "#EF4444"
 
     def _resolve_color(self, color: tuple[str, str] | str) -> str:
         if isinstance(color, tuple):
@@ -1141,8 +1492,8 @@ class ChatApp(ctk.CTk):
         super().__init__()
         self.withdraw()
         self.title("LocalForge AI — Local AI Workspace")
-        self.geometry("1120x760")
-        self.minsize(880, 620)
+        self.geometry("1200x800")
+        self.minsize(980, 650)
         self.configure(fg_color=self.BG)
         ctk.set_appearance_mode("dark")
 
@@ -1152,6 +1503,11 @@ class ChatApp(ctk.CTk):
         legacy_state_dir = state_home / "gemma-assistant"
         if not self.state_dir.exists() and legacy_state_dir.exists():
             legacy_state_dir.rename(self.state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.state_dir.chmod(0o700)
+        except OSError:
+            pass
         self.history_file = self.state_dir / "conversation.json"
         self.settings_file = self.state_dir / "settings.json"
         self.model_manager = LocalModelManager(
@@ -1224,7 +1580,14 @@ class ChatApp(ctk.CTk):
         self.speech_process: subprocess.Popen[Any] | None = None
         self.diff_request: dict[str, Any] | None = None
         self._compact_layout: bool | None = None
+        self._current_view_mode: str = "chat"          # track active Dock button
+        self._dock_buttons: dict[str, ctk.CTkButton] = {}  # mode -> button
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Control-k>", lambda _e: self._open_command_palette())
+        self.bind("<Control-p>", lambda _e: self._open_command_palette())
+        self.bind("<Control-n>", lambda _e: self._clear())
+        self.bind("<Control-b>", lambda _e: self._toggle_sidebar_visibility())
+        self.bind("<Control-Shift-F>", lambda _e: self._open_command_palette())
         self._apply_display_settings()
         self._build_ui()
         self.after(80, self._poll_events)
@@ -1257,8 +1620,7 @@ class ChatApp(ctk.CTk):
             return {}
 
     def _save_preferences(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.settings_file.write_text(json.dumps({
+        atomic_write_text(self.settings_file, json.dumps({
             "api_url": self.api_url_var.get().strip(),
             "selected_model": self.selected_model_var.get(),
             "multi_agent": bool(self.multi_agent_var.get()),
@@ -1270,7 +1632,7 @@ class ChatApp(ctk.CTk):
             "font_scale": float(self.font_scale_var.get()),
             "language": self.language_var.get(),
             "workspace": str(self.tools.workspace),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        }, ensure_ascii=False, indent=2))
 
     def _load_history(self) -> list[dict[str, Any]]:
         try:
@@ -1317,147 +1679,266 @@ class ChatApp(ctk.CTk):
         budget = max(1000, context_size - 2000)
         return select_recent_messages(messages, budget)
 
-    def _build_ui(self) -> None:
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+    def _refresh_project_file_list(self) -> None:
+        if not hasattr(self, "project_file_list"):
+            return
+        for child in self.project_file_list.winfo_children():
+            child.destroy()
 
-        side = ctk.CTkFrame(self, width=270, corner_radius=0, fg_color=self.SIDEBAR)
-        self.sidebar = side
-        side.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
-        side.grid_propagate(False)
+        git_statuses: dict[str, str] = {}
+        try:
+            res = subprocess.run(["git", "status", "--porcelain"], cwd=str(self.tools.workspace), capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    if len(line) >= 4:
+                        st, path = line[:2].strip(), line[3:].strip()
+                        git_statuses[path] = st or "M"
+        except Exception:
+            pass
+
+        try:
+            items = sorted(list(self.tools.workspace.iterdir()), key=lambda p: (not p.is_dir(), p.name.lower()))
+            for item in items[:30]:
+                if item.name.startswith("."):
+                    continue
+                # BMP-only icons (no SMP emoji that fail on Linux X11 fonts)
+                icon = "❏" if item.is_dir() else "▷" if item.suffix == ".py" else "▤"
+                rel = item.name
+                badge_text, badge_color = "", self.MUTED
+                st = ""
+                if rel in git_statuses:
+                    st = git_statuses[rel]
+                elif rel in self.changed_files:
+                    st = "M"
+                elif item.is_dir():
+                    prefix = rel + "/"
+                    for p, s in git_statuses.items():
+                        if p.startswith(prefix):
+                            st = s
+                            break
+                    if not st:
+                        for p in self.changed_files:
+                            if p.startswith(prefix):
+                                st = "M"
+                                break
+                if st:
+                    if "M" in st:
+                        badge_text, badge_color = "M", "#F59E0B"
+                    elif "?" in st or "A" in st:
+                        badge_text, badge_color = "A", "#10B981"
+                    elif "D" in st:
+                        badge_text, badge_color = "D", "#EF4444"
+
+                row = ctk.CTkFrame(self.project_file_list, fg_color="transparent")
+                row.pack(fill="x", pady=1)
+                btn = ctk.CTkButton(
+                    row, text=f"{icon} {item.name}", height=24, corner_radius=5,
+                    fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
+                    anchor="w", font=ctk.CTkFont(size=10),
+                    command=lambda p=item: self._open_path(p) if p.is_file() else self._open_project_explorer()
+                )
+                btn.pack(side="left", fill="x", expand=True)
+                if badge_text:
+                    ctk.CTkLabel(row, text=badge_text, text_color=badge_color, font=ctk.CTkFont(size=9, weight="bold"), width=16).pack(side="right", padx=4)
+        except OSError:
+            pass
+
+    def _build_ui(self) -> None:
+        self.grid_columnconfigure(0, weight=0)  # Icon Dock
+        self.grid_columnconfigure(1, weight=0)  # Left Sidebar
+        self.grid_columnconfigure(2, weight=1)  # Main Workspace Canvas
+        self.grid_columnconfigure(3, weight=0)  # Right Inspector Panel
+        self.grid_rowconfigure(0, weight=1)     # Content area
+        self.grid_rowconfigure(1, weight=0)     # Bottom status bar
+
         self.bind("<Configure>", self._responsive_layout, add="+")
+
+        # -----------------------------------------------------------------
+        # 1. FAR-LEFT ICON DOCK (Column 0)
+        # -----------------------------------------------------------------
+        dock = ctk.CTkFrame(self, width=44, corner_radius=0, fg_color=self.DOCK)
+        self.dock_frame = dock
+        dock.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
+        dock.grid_propagate(False)
+        dock.pack_propagate(False)
+
+        logo_box = ctk.CTkFrame(dock, width=32, height=32, corner_radius=8, fg_color=self.ACCENT)
+        logo_box.pack(padx=6, pady=(12, 12))
+        logo_box.pack_propagate(False)
+        ctk.CTkLabel(logo_box, text="✦", text_color="#FFFFFF", font=ctk.CTkFont(size=14, weight="bold")).pack(expand=True)
+
+        # Separator line
+        ctk.CTkFrame(dock, height=1, fg_color=self.BORDER).pack(fill="x", padx=4, pady=(0, 4))
+
+        def make_dock_btn(mode: str, text: str, command: Any, tooltip_text: str) -> ctk.CTkButton:
+            btn = ctk.CTkButton(
+                dock, text=text, width=34, height=34, corner_radius=8,
+                fg_color="transparent", hover_color=self.PANEL_HOVER,
+                text_color=self.MUTED, font=ctk.CTkFont(size=13),
+                command=command
+            )
+            btn.pack(pady=2)
+            ToolTip(btn, tooltip_text)
+            if mode:
+                self._dock_buttons[mode] = btn
+            return btn
+
+        make_dock_btn("chat", "✉", lambda: self._set_view_mode("chat"), "Chat View")
+        make_dock_btn("editor", "⌨", lambda: self._set_view_mode("editor"), self._t("ide_view"))
+        make_dock_btn("split", "◫", lambda: self._set_view_mode("split"), self._t("split_view"))
+
+        # Separator between view modes and utilities
+        ctk.CTkFrame(dock, height=1, fg_color=self.BORDER).pack(fill="x", padx=4, pady=(2, 2))
+
+        make_dock_btn("", "❏", self._choose_workspace, self._t("workspace"))
+        make_dock_btn("", "▧", self._open_rag_manager, self._t("rag_manage"))
+        make_dock_btn("", "⚙", self._open_settings, self._t("settings"))
+
+        dock_bottom = ctk.CTkFrame(dock, fg_color="transparent")
+        dock_bottom.pack(side="bottom", pady=8)
+        self.dock_theme_btn = ctk.CTkButton(
+            dock_bottom, text="◐", width=34, height=34, corner_radius=17,
+            fg_color="transparent", hover_color=self.PANEL_HOVER,
+            text_color=self.MUTED, font=ctk.CTkFont(size=13),
+            command=self._toggle_theme
+        )
+        self.dock_theme_btn.pack(pady=2)
+        ToolTip(self.dock_theme_btn, self._t("display"))
+
+        user_avatar = ctk.CTkFrame(dock_bottom, width=28, height=28, corner_radius=14, fg_color=self.PANEL, border_width=1, border_color=self.BORDER)
+        user_avatar.pack(pady=4)
+        user_avatar.pack_propagate(False)
+        ctk.CTkLabel(user_avatar, text="♟", text_color=self.MUTED, font=ctk.CTkFont(size=12)).pack(expand=True)
+        ToolTip(user_avatar, self._t("local_model"))
+
+        # -----------------------------------------------------------------
+        # 2. LEFT SIDEBAR (Column 1)
+        # -----------------------------------------------------------------
+        side = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=self.SIDEBAR)
+        self.sidebar = side
+        side.grid(row=0, column=1, sticky="nsew", padx=(0, 1))
+        side.grid_propagate(False)
+
         brand = ctk.CTkFrame(side, fg_color="transparent")
-        brand.pack(fill="x", padx=14, pady=(16, 16))
-        icon_box = ctk.CTkFrame(brand, width=30, height=30, corner_radius=8, fg_color=self.ACCENT)
-        icon_box.pack(side="left")
-        icon_box.pack_propagate(False)
-        ctk.CTkLabel(icon_box, text="⚙", text_color="#FFFFFF", font=ctk.CTkFont(size=16)).pack(expand=True)
-        brand_text = ctk.CTkFrame(brand, fg_color="transparent")
-        brand_text.pack(side="left", padx=9)
+        brand.pack(fill="x", padx=12, pady=(14, 12))
         ctk.CTkLabel(
-            brand_text, text="LocalForge AI", anchor="w", text_color=self.TEXT,
-            font=ctk.CTkFont(size=13, weight="bold")
-        ).pack(anchor="w", pady=(0, 0))
+            brand, text="LocalForge AI", anchor="w", text_color=self.TEXT,
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w")
         ctk.CTkLabel(
-            brand_text, text=self._t("local_model"), anchor="w", text_color=self.MUTED,
-            font=ctk.CTkFont(size=11)
-        ).pack(anchor="w", pady=(0, 0))
+            brand, text=self._t("local_model"), anchor="w", text_color=self.MUTED,
+            font=ctk.CTkFont(size=10)
+        ).pack(anchor="w")
 
         ctk.CTkButton(
-            side, text=self._t("new_chat"), height=32, corner_radius=8,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color="#B9A8FF",
+            side, text="+ " + self._t("new_chat"), height=34, corner_radius=9,
+            fg_color=self.ACCENT_SUBTLE, hover_color=self.PANEL_HOVER, text_color="#B9A8FF",
             border_width=1, border_color=self.ACCENT,
             font=ctk.CTkFont(size=12, weight="bold"), command=self._clear
-        ).pack(fill="x", padx=14, pady=(0, 8))
+        ).pack(fill="x", padx=12, pady=(0, 10))
 
-        ctk.CTkButton(
-            side, text=self._t("index_rag"), height=32, corner_radius=8,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color="#A7F3D0",
-            border_width=1, border_color="#34D399",
-            font=ctk.CTkFont(size=12, weight="bold"), command=self._index_document
-        ).pack(fill="x", padx=14, pady=(0, 6))
-        ctk.CTkButton(
-            side, text=self._t("rag_manage"), height=28, corner_radius=8,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
-            border_width=1, border_color=self.BORDER,
-            font=ctk.CTkFont(size=11), command=self._open_rag_manager
-        ).pack(fill="x", padx=14, pady=(0, 18))
-
-        # Reserve the sidebar footer before adding expandable content.  Tk's
-        # packer allocates space in packing order; placing this after the
-        # conversation list allowed that list to consume the whole sidebar at
-        # small window sizes or higher UI scales.
+        # Privacy status badge at bottom of sidebar
         sidebar_footer = ctk.CTkFrame(side, fg_color=self.SIDEBAR)
         sidebar_footer.pack(side="bottom", fill="x")
-        self.settings_button = ctk.CTkButton(
-            sidebar_footer, text=self._t("settings"), height=40, corner_radius=20,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
-            font=ctk.CTkFont(size=13, weight="bold"), command=self._open_settings
-        )
-        self.settings_button.pack(fill="x", padx=18, pady=(4, 2))
-        self.system_monitor = ctk.CTkFrame(sidebar_footer, fg_color="transparent")
-        self.system_monitor.pack(fill="x", padx=14, pady=(8, 14))
-        self.sys_cpu = ctk.CTkLabel(self.system_monitor, text="CPU —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color=self.MUTED)
-        self.sys_cpu.grid(row=0, column=0, sticky="ew", padx=(0, 2), pady=(0, 4))
-        self.sys_ram = ctk.CTkLabel(self.system_monitor, text="RAM —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color=self.MUTED)
-        self.sys_ram.grid(row=0, column=1, sticky="ew", padx=(2, 0), pady=(0, 4))
-        self.sys_gpu = ctk.CTkLabel(self.system_monitor, text="GPU —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color=self.MUTED)
-        self.sys_gpu.grid(row=1, column=0, sticky="ew", padx=(0, 2))
-        self.sys_vram = ctk.CTkLabel(self.system_monitor, text="VRAM —", fg_color=self.PANEL, corner_radius=6, font=ctk.CTkFont(size=11), text_color=self.MUTED)
-        self.sys_vram.grid(row=1, column=1, sticky="ew", padx=(2, 0))
-        self.system_monitor.grid_columnconfigure((0,1), weight=1)
 
+        privacy_card = ctk.CTkFrame(sidebar_footer, fg_color=self.PANEL, corner_radius=10, border_width=1, border_color=("#94A3B8", "#10B981"))
+        privacy_card.pack(fill="x", padx=10, pady=(6, 10))
+        priv_dot = ctk.CTkLabel(privacy_card, text="●", text_color="#10B981", font=ctk.CTkFont(size=10))
+        priv_dot.pack(side="left", padx=(8, 4), pady=6)
+        ctk.CTkLabel(
+            privacy_card, text=self._t("local_privacy_notice"), anchor="w",
+            text_color=self.MUTED, font=ctk.CTkFont(family=THAI_FONT, size=9)
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
+
+        self.settings_button = ctk.CTkButton(
+            sidebar_footer, text=self._t("settings"), height=34, corner_radius=8,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            font=ctk.CTkFont(size=12, weight="bold"), command=self._open_settings
+        )
+        self.settings_button.pack(fill="x", padx=10, pady=(2, 4))
+
+        # Workspace Card in Sidebar
         workspace_card = ctk.CTkFrame(side, fg_color="transparent")
-        workspace_card.pack(fill="x", padx=14, pady=(0, 0))
+        workspace_card.pack(fill="x", padx=12, pady=(0, 6))
         ctk.CTkLabel(
             workspace_card, text=self._t("workspace"), anchor="w", text_color=self.MUTED,
-            font=ctk.CTkFont(size=11)
-        ).pack(fill="x", pady=(0, 8))
+            font=ctk.CTkFont(size=10, weight="bold")
+        ).pack(fill="x", pady=(0, 4))
         self.workspace_button = ctk.CTkButton(
-            workspace_card, text="📁 " + str(self.tools.workspace), height=28, corner_radius=7,
+            workspace_card, text="❏ " + str(self.tools.workspace), height=26, corner_radius=6,
             fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             border_width=1, border_color=self.BORDER, anchor="w",
-            font=ctk.CTkFont(size=11), command=self._choose_workspace
+            font=ctk.CTkFont(size=10), command=self._choose_workspace
         )
-        self.workspace_button.pack(fill="x", pady=(0, 6))
+        self.workspace_button.pack(fill="x", pady=(0, 4))
         ToolTip(self.workspace_button, self._t("change_folder"))
 
         ws_actions = ctk.CTkFrame(workspace_card, fg_color="transparent")
-        ws_actions.pack(fill="x", pady=(0, 18))
+        ws_actions.pack(fill="x", pady=(0, 8))
         explorer_button = ctk.CTkButton(
-            ws_actions, text=self._t("explorer"), height=26, corner_radius=6,
+            ws_actions, text=self._t("explorer"), height=24, corner_radius=6,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             border_width=1, border_color=self.BORDER,
-            font=ctk.CTkFont(size=11), command=self._open_project_explorer,
+            font=ctk.CTkFont(size=10), command=self._open_project_explorer,
         )
-        explorer_button.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        explorer_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
         ToolTip(explorer_button, self._t("project_explorer"))
         undo_button = ctk.CTkButton(
-            ws_actions, text=self._t("undo"), height=26, corner_radius=6,
+            ws_actions, text=self._t("undo"), height=24, corner_radius=6,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
             border_width=1, border_color=self.BORDER,
-            font=ctk.CTkFont(size=11), command=self._undo_files,
+            font=ctk.CTkFont(size=10), command=self._undo_files,
         )
-        undo_button.pack(side="right", fill="x", expand=True, padx=(3, 0))
+        undo_button.pack(side="right", fill="x", expand=True, padx=(2, 0))
         ToolTip(undo_button, self._t("undo_short"))
 
+        # Conversations section
         conversations = ctk.CTkFrame(side, fg_color="transparent")
-        conversations.pack(fill="both", expand=True, padx=14, pady=(0, 6))
+        conversations.pack(fill="both", expand=True, padx=12, pady=(0, 4))
         ctk.CTkLabel(
             conversations, text=self._t("conversations"), anchor="w", text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=11)
-        ).pack(fill="x", pady=(0, 8))
+            font=ctk.CTkFont(family=THAI_FONT, size=10, weight="bold")
+        ).pack(fill="x", pady=(0, 4))
         self.conversation_search_var = ctk.StringVar()
         search = ctk.CTkEntry(
             conversations, textvariable=self.conversation_search_var,
-            placeholder_text=self._t("search_conversations"), height=28, corner_radius=7,
+            placeholder_text=self._t("search_conversations"), height=26, corner_radius=6,
             fg_color="transparent", border_width=1, border_color=self.BORDER, text_color=self.TEXT,
-            font=ctk.CTkFont(family=THAI_FONT, size=11),
+            font=ctk.CTkFont(family=THAI_FONT, size=10),
         )
-        search.pack(fill="x", pady=(0, 8))
+        search.pack(fill="x", pady=(0, 6))
         search.bind("<KeyRelease>", lambda _event: self._refresh_conversations())
         self.conversation_list = ctk.CTkScrollableFrame(
-            conversations, fg_color="transparent", height=140,
+            conversations, fg_color="transparent", height=120,
             scrollbar_button_color=self.BORDER,
         )
         self.conversation_list.pack(fill="both", expand=True)
         convo_actions = ctk.CTkFrame(conversations, fg_color="transparent")
-        convo_actions.pack(fill="x", pady=(6, 0))
-        ctk.CTkButton(convo_actions, text=self._t("export"), width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._export_conversation).pack(side="left", padx=(0, 3))
-        ctk.CTkButton(convo_actions, text=self._t("pin"), width=75, height=28, corner_radius=14, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, command=self._pin_conversation).pack(side="left", padx=3)
-        ctk.CTkButton(convo_actions, text=self._t("delete"), width=55, height=28, corner_radius=14, fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT, command=self._delete_conversation).pack(side="right")
+        convo_actions.pack(fill="x", pady=(4, 0))
+        ctk.CTkButton(convo_actions, text=self._t("export"), width=68, height=24, corner_radius=12, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, font=ctk.CTkFont(size=10), command=self._export_conversation).pack(side="left", padx=(0, 2))
+        ctk.CTkButton(convo_actions, text=self._t("pin"), width=58, height=24, corner_radius=12, fg_color=self.PANEL, hover_color=self.PANEL_HOVER, text_color=self.TEXT, font=ctk.CTkFont(size=10), command=self._pin_conversation).pack(side="left", padx=2)
+        ctk.CTkButton(convo_actions, text=self._t("delete"), width=50, height=24, corner_radius=12, fg_color="transparent", hover_color=("#FEE2E2", "#713747"), text_color=self.TEXT, font=ctk.CTkFont(size=10), command=self._delete_conversation).pack(side="right")
         self._refresh_conversations()
 
+        # -----------------------------------------------------------------
+        # 3. MAIN WORKSPACE CANVAS (Column 2) & EMBEDDED IDE PANEL
+        # -----------------------------------------------------------------
         main = ctk.CTkFrame(self, corner_radius=0, fg_color=self.BG)
-        main.grid(row=0, column=1, sticky="nsew")
+        self.main_frame = main
+        main.grid(row=0, column=2, sticky="nsew")
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(1, weight=1)
 
-        header = ctk.CTkFrame(main, height=78, corner_radius=0, fg_color=self.BG)
-        header.grid(row=0, column=0, sticky="ew", padx=28)
+        editor_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=self.BG)
+        self.editor_frame = editor_frame
+        self.code_editor = CodeEditorPanel(editor_frame, app=self)
+        self.code_editor.pack(fill="both", expand=True, padx=8, pady=8)
+
+        header = ctk.CTkFrame(main, height=64, corner_radius=0, fg_color=self.BG)
+        header.grid(row=0, column=0, sticky="ew", padx=20)
         header.grid_propagate(False)
         title_box = ctk.CTkFrame(header, fg_color="transparent")
-        title_box.pack(side="left", pady=14)
+        title_box.pack(side="left", pady=12)
         ctk.CTkLabel(
             title_box, text=self._t("your_assistant"), anchor="w", text_color=self.TEXT,
             font=ctk.CTkFont(size=15, weight="bold")
@@ -1465,125 +1946,236 @@ class ChatApp(ctk.CTk):
         tagline_frame = ctk.CTkFrame(title_box, fg_color="transparent")
         tagline_frame.pack(anchor="w", pady=(2, 0))
 
-        icon = ctk.CTkLabel(tagline_frame, text="✨", font=ctk.CTkFont(size=14), text_color=self.MUTED)
-        icon.pack(side="left", padx=(0, 10))
+        icon = ctk.CTkLabel(tagline_frame, text="✨", font=ctk.CTkFont(size=13), text_color=self.MUTED)
+        icon.pack(side="left", padx=(0, 6))
         ToolTip(icon, self._t("tagline"))
 
         status_container = ctk.CTkFrame(header, fg_color="transparent")
-        status_container.pack(side="right", pady=24)
-
-        self.theme_btn = ctk.CTkButton(
-            status_container, text="🌓", width=28, height=28, corner_radius=14,
-            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
-            font=ctk.CTkFont(size=14), command=self._toggle_theme
-        )
-        self.theme_btn.pack(side="left", padx=(0, 12))
+        status_container.pack(side="right", pady=16)
 
         choices = self._model_choices()
         self.header_model_menu = ctk.CTkOptionMenu(
             status_container, variable=self.selected_model_var, values=choices,
-            font=ctk.CTkFont(size=11, weight="bold"), fg_color=self.BG,
-            text_color=self.MUTED, button_color=self.BG,
+            font=ctk.CTkFont(size=11, weight="bold"), fg_color=self.PANEL,
+            text_color=self.TEXT, button_color=self.PANEL,
             button_hover_color=self.PANEL_HOVER, dropdown_fg_color=self.PANEL,
             dropdown_text_color=self.TEXT, width=140, anchor="e",
             command=self._header_model_selected
         )
-        self.header_model_menu.pack(side="left", padx=(0, 12))
+        self.header_model_menu.pack(side="left", padx=(0, 8))
 
         status_box = ctk.CTkFrame(status_container, fg_color=self.PANEL, corner_radius=13, border_width=1, border_color=self.BORDER)
-        status_box.pack(side="left", padx=(0, 8))
-        self.status_dot = ctk.CTkLabel(status_box, text="●", text_color=self.MUTED, font=ctk.CTkFont(size=11))
-        self.status_dot.pack(side="left", padx=(10, 5))
+        status_box.pack(side="left")
+        self.status_dot = ctk.CTkLabel(status_box, text="●", text_color=self.MUTED, font=ctk.CTkFont(size=10))
+        self.status_dot.pack(side="left", padx=(8, 4))
         self.status = ctk.CTkLabel(
             status_box, text=self._t("model_off"), text_color=self.MUTED,
             font=ctk.CTkFont(size=11)
         )
-        self.status.pack(side="left", padx=(0, 4), pady=4)
+        self.status.pack(side="left", padx=(0, 4), pady=3)
 
         self.model_toggle_btn = ctk.CTkButton(
             status_box, text="⏻", width=22, height=22, corner_radius=11,
             fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
-            font=ctk.CTkFont(size=12), command=self._toggle_model_server
+            font=ctk.CTkFont(size=11), command=self._toggle_model_server
         )
-        self.model_toggle_btn.pack(side="left", padx=(0, 6), pady=2)
-        self.context_button = ctk.CTkButton(
-            status_container, text="Context 0%", width=80, height=26, corner_radius=13,
-            fg_color="transparent", hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=11),
-            command=self._open_context_inspector,
-        )
-        self.context_button.pack(side="left")
+        self.model_toggle_btn.pack(side="left", padx=(0, 4), pady=2)
 
         self.chat = ctk.CTkScrollableFrame(
             main, fg_color="transparent", corner_radius=0,
             scrollbar_button_color=self.BORDER, scrollbar_button_hover_color=self.ACCENT
         )
-        self.chat.grid(row=1, column=0, sticky="nsew", padx=(26, 18), pady=(0, 8))
+        self.chat.grid(row=1, column=0, sticky="nsew", padx=(16, 12), pady=(0, 4))
         self.chat.grid_columnconfigure(0, weight=1)
 
+        # Composer container
+        composer_wrap = ctk.CTkFrame(main, fg_color=self.BG)
+        composer_wrap.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 8))
+        composer_wrap.grid_columnconfigure(0, weight=1)
+
         composer = ctk.CTkFrame(
-            main, fg_color=self.PANEL, corner_radius=12,
+            composer_wrap, fg_color=self.PANEL, corner_radius=12,
             border_width=1, border_color=self.BORDER
         )
-        composer.grid(row=2, column=0, sticky="ew", padx=28, pady=(8, 24))
+        composer.grid(row=0, column=0, sticky="ew")
         composer.grid_columnconfigure(0, weight=1)
+
         self.input = ctk.CTkTextbox(
-            composer, height=82, wrap="word", font=ctk.CTkFont(family=THAI_FONT, size=14),
+            composer, height=60, wrap="word", font=ctk.CTkFont(family=THAI_FONT, size=13),
             fg_color="transparent", border_width=0, text_color=self.TEXT
         )
-        self.input.grid(row=0, column=0, sticky="ew", padx=(14, 8), pady=8)
+        self.input.grid(row=0, column=0, sticky="ew", padx=(12, 4), pady=(6, 2))
         self.input.bind("<Control-Return>", self._send_event)
         self.input.bind("<Control-Shift-V>", self._paste_image_event)
         self._bind_edit_menu(self.input, readonly=False)
+
         media_bar = ctk.CTkFrame(composer, fg_color="transparent")
-        media_bar.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))
+        media_bar.grid(row=1, column=0, sticky="w", padx=8, pady=(0, 5))
         self.attach_button = ctk.CTkButton(
-            media_bar, text=self._t("attach_image"), width=104, height=28,
+            media_bar, text="+ " + self._t("attach_image"), width=90, height=24,
             fg_color="transparent", hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, text_color=self.TEXT, command=self._choose_image,
+            border_width=1, border_color=self.BORDER, text_color=self.MUTED,
+            font=ctk.CTkFont(size=10), command=self._choose_image,
         )
-        self.attach_button.pack(side="left", padx=(0, 6))
+        self.attach_button.pack(side="left", padx=(0, 3))
         self.voice_button = ctk.CTkButton(
-            media_bar, text=self._t("voice"), width=92, height=28,
+            media_bar, text="● " + self._t("voice"), width=80, height=24,
             fg_color="transparent", hover_color=self.PANEL_HOVER,
-            border_width=1, border_color=self.BORDER, text_color=self.TEXT, command=self._toggle_recording,
+            border_width=1, border_color=self.BORDER, text_color=self.MUTED,
+            font=ctk.CTkFont(size=10), command=self._toggle_recording,
         )
-        self.voice_button.pack(side="left", padx=(0, 8))
+        self.voice_button.pack(side="left", padx=(0, 6))
         self.router_switch = ctk.CTkSwitch(
             media_bar, text=self._t("auto_router"), variable=self.auto_router_var,
-            font=ctk.CTkFont(size=11), text_color=self.MUTED, switch_width=32, switch_height=16,
+            font=ctk.CTkFont(size=10), text_color=self.MUTED, switch_width=30, switch_height=14,
             command=self._save_preferences
         )
-        self.router_switch.pack(side="left", padx=(12, 8))
+        self.router_switch.pack(side="left", padx=(0, 6))
 
         self.agent_switch = ctk.CTkSwitch(
             media_bar, text=self._t("multi_agent_switch"), variable=self.multi_agent_var,
-            font=ctk.CTkFont(size=11), text_color=self.MUTED, switch_width=32, switch_height=16,
+            font=ctk.CTkFont(size=10), text_color=self.MUTED, switch_width=30, switch_height=14,
             command=self._save_preferences
         )
-        self.agent_switch.pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(
-            media_bar, text=self._t("multi_agent_flow"), text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=9),
-        ).pack(side="left", padx=(0, 8))
+        self.agent_switch.pack(side="left", padx=(0, 4))
         self.media_status = ctk.CTkLabel(
             media_bar, text="", text_color=self.MUTED,
-            font=ctk.CTkFont(family=THAI_FONT, size=10),
+            font=ctk.CTkFont(family=THAI_FONT, size=9),
         )
         self.media_status.pack(side="left")
+
+        # Send/Stop button
         self.send_button = ctk.CTkButton(
-            composer, text=self._t("send"), width=94, height=48, corner_radius=8,
+            composer, text=self._t("send"), width=70, height=32, corner_radius=8,
             fg_color=self.ACCENT, hover_color=self.ACCENT_HOVER,
-            font=ctk.CTkFont(size=14, weight="bold"), command=self.send
+            font=ctk.CTkFont(size=12, weight="bold"), command=self.send
         )
-        self.send_button.grid(row=0, column=1, padx=(0, 12), pady=12)
+        self.send_button.grid(row=0, column=1, padx=(0, 8), pady=6)
         self.stop_button = ctk.CTkButton(
-            composer, text=self._t("stop"), width=94, height=48, corner_radius=8,
+            composer, text=self._t("stop"), width=70, height=32, corner_radius=8,
             fg_color="#8D3D52", hover_color="#A34860",
-            font=ctk.CTkFont(family=THAI_FONT, size=14, weight="bold"),
+            font=ctk.CTkFont(family=THAI_FONT, size=12, weight="bold"),
             command=self._cancel_generation,
         )
+
+        # -----------------------------------------------------------------
+        # 4. RIGHT INSPECTOR PANEL (Column 3)
+        # -----------------------------------------------------------------
+        inspector = ctk.CTkFrame(self, width=260, corner_radius=0, fg_color=self.SIDEBAR)
+        self.inspector = inspector
+        inspector.grid(row=0, column=3, sticky="nsew", padx=(1, 0))
+        inspector.grid_propagate(False)
+
+        # CARD 1: Model & Hardware Inspector
+        mod_card = ctk.CTkFrame(inspector, fg_color=self.PANEL, corner_radius=10, border_width=1, border_color=self.BORDER)
+        mod_card.pack(fill="x", padx=10, pady=(14, 8))
+
+        mod_header = ctk.CTkFrame(mod_card, fg_color="transparent")
+        mod_header.pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkLabel(mod_header, text="⬡", font=ctk.CTkFont(size=14), text_color=self.ACCENT).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(mod_header, text=self._t("model_inspector"), text_color=self.TEXT, font=ctk.CTkFont(size=11, weight="bold")).pack(side="left")
+
+        self.right_model_name_label = ctk.CTkLabel(mod_card, textvariable=self.selected_model_var, text_color=self.ACCENT, font=ctk.CTkFont(size=11, weight="bold"), anchor="w")
+        self.right_model_name_label.pack(fill="x", padx=10, pady=(0, 2))
+
+        self.right_model_status_label = ctk.CTkLabel(mod_card, text=self._t("running_locally"), text_color="#10B981", font=ctk.CTkFont(size=9), anchor="w")
+        self.right_model_status_label.pack(fill="x", padx=10, pady=(0, 6))
+
+        # VRAM visual progress bar
+        vram_box = ctk.CTkFrame(mod_card, fg_color="transparent")
+        vram_box.pack(fill="x", padx=10, pady=(0, 8))
+        self.vram_text_label = ctk.CTkLabel(vram_box, text="VRAM  0.0 / 8.0 GB", text_color=self.MUTED, font=ctk.CTkFont(size=9), anchor="w")
+        self.vram_text_label.pack(fill="x")
+        self.vram_progress = ctk.CTkProgressBar(vram_box, height=6, corner_radius=3, fg_color=self.BORDER, progress_color=self.ACCENT)
+        self.vram_progress.set(0.0)
+        self.vram_progress.pack(fill="x", pady=(2, 4))
+
+        # System Hardware Stats Container
+        self.system_monitor = ctk.CTkFrame(mod_card, fg_color="transparent")
+        self.system_monitor.pack(fill="x", padx=10, pady=(0, 8))
+        self.sys_cpu = ctk.CTkLabel(self.system_monitor, text="CPU —", fg_color=self.SIDEBAR, corner_radius=5, font=ctk.CTkFont(size=9), text_color=self.MUTED)
+        self.sys_cpu.grid(row=0, column=0, sticky="ew", padx=(0, 2), pady=(0, 2))
+        self.sys_ram = ctk.CTkLabel(self.system_monitor, text="RAM —", fg_color=self.SIDEBAR, corner_radius=5, font=ctk.CTkFont(size=9), text_color=self.MUTED)
+        self.sys_ram.grid(row=0, column=1, sticky="ew", padx=(2, 0), pady=(0, 2))
+        self.sys_gpu = ctk.CTkLabel(self.system_monitor, text="GPU —", fg_color=self.SIDEBAR, corner_radius=5, font=ctk.CTkFont(size=9), text_color=self.MUTED)
+        self.sys_gpu.grid(row=1, column=0, sticky="ew", padx=(0, 2))
+        self.sys_vram = ctk.CTkLabel(self.system_monitor, text="VRAM —", fg_color=self.SIDEBAR, corner_radius=5, font=ctk.CTkFont(size=9), text_color=self.MUTED)
+        self.sys_vram.grid(row=1, column=1, sticky="ew", padx=(2, 0))
+        self.system_monitor.grid_columnconfigure((0,1), weight=1)
+
+        # CARD 2: Context Inspector Card
+        ctx_card = ctk.CTkFrame(inspector, fg_color=self.PANEL, corner_radius=10, border_width=1, border_color=self.BORDER)
+        ctx_card.pack(fill="x", padx=10, pady=(0, 8))
+
+        ctx_header = ctk.CTkFrame(ctx_card, fg_color="transparent")
+        ctx_header.pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkLabel(ctx_header, text="◎", font=ctk.CTkFont(size=14)).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(ctx_header, text=self._t("context_breakdown"), text_color=self.TEXT, font=ctk.CTkFont(size=11, weight="bold")).pack(side="left")
+
+        self.context_donut = ContextDonutChart(ctx_card)
+        self.context_donut.pack(fill="x", padx=6, pady=(0, 6))
+
+        ctx_actions = ctk.CTkFrame(ctx_card, fg_color="transparent")
+        ctx_actions.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkButton(
+            ctx_actions, text="✂ " + self._t("trim_recent"), height=22, corner_radius=5,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            border_width=1, border_color=self.BORDER, font=ctk.CTkFont(size=9),
+            command=self._trim_context
+        ).pack(side="left", fill="x", expand=True, padx=(0, 2))
+        ctk.CTkButton(
+            ctx_actions, text="✎ " + self._t("summarize_old"), height=22, corner_radius=5,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            border_width=1, border_color=self.BORDER, font=ctk.CTkFont(size=9),
+            command=self._summarize_context
+        ).pack(side="right", fill="x", expand=True, padx=(2, 0))
+
+
+
+        # -----------------------------------------------------------------
+        # 5. BOTTOM GLOBAL STATUS BAR (Row 1, spanning cols 0..4)
+        # -----------------------------------------------------------------
+        status_bar = ctk.CTkFrame(self, height=26, corner_radius=0, fg_color=self.DOCK)
+        self.status_bar = status_bar
+        status_bar.grid(row=1, column=0, columnspan=4, sticky="ew")
+        status_bar.grid_propagate(False)
+
+        stat_left = ctk.CTkFrame(status_bar, fg_color="transparent")
+        stat_left.pack(side="left", padx=12)
+        ctk.CTkButton(
+            stat_left, text="⎇ main ∨", width=65, height=20, corner_radius=4,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            font=ctk.CTkFont(size=9, weight="bold")
+        ).pack(side="left", padx=(0, 6))
+        self.status_bar_ws_label = ctk.CTkLabel(
+            stat_left, text=self._t("no_changes"),
+            text_color="#10B981", font=ctk.CTkFont(size=9)
+        )
+        self.status_bar_ws_label.pack(side="left")
+
+        stat_right = ctk.CTkFrame(status_bar, fg_color="transparent")
+        stat_right.pack(side="right", padx=12)
+        ctk.CTkButton(
+            stat_right, text=self._t("run_btn") + " ∨", width=55, height=20, corner_radius=4,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
+            font=ctk.CTkFont(size=9, weight="bold")
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            stat_right, text=self._t("review"), width=60, height=20, corner_radius=4,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.TEXT,
+            font=ctk.CTkFont(size=9), command=self._open_project_explorer
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            stat_right, text=self._t("undo"), width=55, height=20, corner_radius=4,
+            fg_color="transparent", hover_color=self.PANEL_HOVER, text_color=self.MUTED,
+            font=ctk.CTkFont(size=9), command=self._undo_files
+        ).pack(side="left", padx=2)
+        self.status_bar_hw_label = ctk.CTkLabel(
+            stat_right, text="LocalForge AI • 8080",
+            text_color=self.MUTED, font=ctk.CTkFont(size=9)
+        )
+        self.status_bar_hw_label.pack(side="right", padx=(8, 0))
+
         if self.messages:
             for index, message in enumerate(self.messages):
                 self._append(
@@ -1592,8 +2184,54 @@ class ChatApp(ctk.CTk):
                     media_paths=message.get("media_paths"),
                 )
         else:
-            self._append(self._t("system"), self._t("ready"))
+            # --- Premium Empty State UI ---
+            empty = ctk.CTkFrame(self.chat, fg_color="transparent")
+            empty.grid(sticky="nsew", padx=20, pady=40)
+            empty.grid_columnconfigure(0, weight=1)
+            self._empty_state_frame = empty
+
+            logo_outer = ctk.CTkFrame(empty, width=72, height=72, corner_radius=22, fg_color=self.ACCENT)
+            logo_outer.grid(pady=(0, 18))
+            logo_outer.pack_propagate(False)
+            ctk.CTkLabel(logo_outer, text="✦", text_color="#FFFFFF",
+                         font=ctk.CTkFont(size=34, weight="bold")).pack(expand=True)
+
+            ctk.CTkLabel(empty, text=self._t("your_assistant"), text_color=self.TEXT,
+                         font=ctk.CTkFont(size=20, weight="bold")).grid(pady=(0, 6))
+            ctk.CTkLabel(empty, text=self._t("tagline"), text_color=self.MUTED,
+                         font=ctk.CTkFont(family=THAI_FONT, size=12)).grid(pady=(0, 28))
+
+            tips_frame = ctk.CTkFrame(empty, fg_color=self.PANEL, corner_radius=14,
+                                      border_width=1, border_color=self.BORDER)
+            tips_frame.grid(sticky="ew", pady=(0, 0))
+            tips_frame.grid_columnconfigure(0, weight=1)
+
+            tips = [
+                ("✉", "Ctrl+Return", "ส่งข้อความถึง AI"),
+                ("\u25eb", "Ctrl+K", "Command Palette"),
+                ("\u25a4", "Ctrl+Shift+V", "วางรูปภาพ"),
+                ("\u2328", "Ctrl+B", "ซ่อน/แสดง Sidebar"),
+            ]
+            for i, (icon, key, desc) in enumerate(tips):
+                tip_row = ctk.CTkFrame(tips_frame, fg_color="transparent")
+                tip_row.grid(row=i, column=0, sticky="ew", padx=18, pady=8)
+                tip_row.grid_columnconfigure(1, weight=1)
+                ctk.CTkLabel(tip_row, text=icon, text_color=self.ACCENT,
+                             font=ctk.CTkFont(size=15)).grid(row=0, column=0, padx=(0, 12))
+                ctk.CTkLabel(tip_row, text=desc, text_color=self.TEXT,
+                             font=ctk.CTkFont(family=THAI_FONT, size=12), anchor="w").grid(row=0, column=1, sticky="w")
+                ctk.CTkLabel(tip_row, text=key, text_color=self.MUTED,
+                             fg_color=self.SIDEBAR, corner_radius=5,
+                             font=ctk.CTkFont(size=10, weight="bold"),
+                             padx=6, pady=2).grid(row=0, column=2, padx=(12, 0))
+
+                if i < len(tips) - 1:
+                    ctk.CTkFrame(tips_frame, height=1, fg_color=self.BORDER).grid(
+                        row=i + 100,
+                        column=0, sticky="ew", padx=18
+                    )
         self._update_context_meter()
+
 
     def _bind_edit_menu(self, widget: Any, readonly: bool) -> None:
         target = getattr(widget, "_textbox", widget)
@@ -1696,21 +2334,59 @@ class ChatApp(ctk.CTk):
         is_user = who in user_labels
         is_error = who in error_labels
         is_system = who in system_labels or is_error
+
+        # ── Outer row: full-width grid row ──
         row = ctk.CTkFrame(self.chat, fg_color="transparent")
-        row.grid(sticky="ew", padx=8, pady=7)
-        row.grid_columnconfigure(0, weight=1)
-        bubble = ctk.CTkFrame(
-            row,
-            fg_color="transparent",
-            corner_radius=0,
-            border_width=0,
-        )
-        bubble.grid(row=0, column=0, sticky="e" if is_user else "w", padx=(60, 0) if is_user else (0, 60))
-        label_color = ("#EF4444", "#FF9EAE") if is_error else ("#7C5CFC", "#B9A8FF") if not is_user else self.MUTED
+        row.grid(sticky="ew", padx=8, pady=(4, 4))
+        row.grid_columnconfigure(1, weight=1)
+
+        # ── Avatar ──
+        if is_user:
+            avatar_text, avatar_bg, avatar_fg = "♟", self.ACCENT, "#FFFFFF"
+        elif is_system or is_error:
+            avatar_text, avatar_bg, avatar_fg = "!", ("#FEF3C7", "#78350F"), ("#92400E", "#FDE68A")
+        else:
+            avatar_text, avatar_bg, avatar_fg = "✦", self.ACCENT, "#FFFFFF"
+
+        if is_user:
+            avatar_col, bubble_col, bubble_sticky = 2, 1, "e"
+        else:
+            avatar_col, bubble_col, bubble_sticky = 0, 1, "w"
+
+        avatar_frame = ctk.CTkFrame(row, width=32, height=32, corner_radius=16,
+                                    fg_color=avatar_bg)
+        avatar_frame.grid(row=0, column=avatar_col, padx=(6 if is_user else 4, 4 if is_user else 6),
+                          pady=(6, 0), sticky="n")
+        avatar_frame.pack_propagate(False)
+        ctk.CTkLabel(avatar_frame, text=avatar_text, text_color=avatar_fg,
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(expand=True)
+
+        # ── Bubble card ──
+        if is_user:
+            bubble_bg = self.USER_BUBBLE
+            bubble_border = self.ACCENT
+        elif is_error:
+            bubble_bg = ("#FFF1F2", "#2D1020")
+            bubble_border = ("#FCA5A5", "#7F1D1D")
+        elif is_system:
+            bubble_bg = ("#F0FDF4", "#0B1E14")
+            bubble_border = ("#86EFAC", "#065F46")
+        else:
+            bubble_bg = self.BOT_BUBBLE
+            bubble_border = self.BORDER
+
+        bubble = ctk.CTkFrame(row, fg_color=bubble_bg, corner_radius=12,
+                              border_width=1, border_color=bubble_border)
+        bubble.grid(row=0, column=bubble_col, sticky=bubble_sticky,
+                    padx=(56 if is_user else 0, 0 if is_user else 56))
+
+        # Role label (small, above text)
+        label_color = ("#EF4444", "#FF9EAE") if is_error else ("#7C5CFC", "#B9A8FF") if not is_user else ("#6D28D9", "#A78BFA")
         ctk.CTkLabel(
             bubble, text=who.upper(), anchor="e" if is_user else "w", text_color=label_color,
-            font=ctk.CTkFont(size=10, weight="bold")
-        ).pack(fill="x", padx=15, pady=(5, 2))
+            font=ctk.CTkFont(size=9, weight="bold")
+        ).pack(fill="x", padx=14, pady=(8, 1))
+
         for media_path in media_paths or []:
             thumbnail = self._chat_thumbnail(Path(media_path))
             if thumbnail is not None:
@@ -1718,16 +2394,17 @@ class ChatApp(ctk.CTk):
                 ctk.CTkLabel(
                     bubble, text="", image=thumbnail, corner_radius=10,
                     fg_color="transparent",
-                ).pack(padx=15, pady=(6, 4))
+                ).pack(padx=14, pady=(6, 4))
+
         line_count = max(1, text.count("\n") + (len(text) // 78) + 1)
-        bubble_width = max(360, min(800, self.winfo_width() - 300))
+        bubble_width = max(340, min(780, self.winfo_width() - 280))
         body = ctk.CTkTextbox(
             bubble, width=bubble_width, height=max(34, line_count * 25), wrap="word",
             activate_scrollbars=False, fg_color="transparent",
             border_width=0, text_color=self.TEXT,
             font=ctk.CTkFont(family=THAI_FONT, size=14),
         )
-        body.pack(fill="x", padx=9, pady=(2, 2))
+        body.pack(fill="x", padx=10, pady=(2, 4))
         body.insert("1.0", text)
         self._highlight_markdown(body, text)
         body.configure(state="disabled")
@@ -1780,6 +2457,15 @@ class ChatApp(ctk.CTk):
                     border_width=1, border_color=self.BORDER, text_color=self.MUTED,
                     command=lambda value=code.strip(): self._copy_text(value),
                 ).pack(side="right", padx=3)
+            for code in code_blocks[:1]:
+                if any(kw in code for kw in ["print(", "import ", "def ", "echo ", "sudo ", "cd "]):
+                    ctk.CTkButton(
+                        footer, text=self._t("run_code"), width=86, height=26, corner_radius=8,
+                        fg_color="transparent", hover_color=self.PANEL_HOVER,
+                        border_width=1, border_color="#10B981", text_color="#10B981",
+                        font=ctk.CTkFont(family=THAI_FONT, size=10),
+                        command=lambda val=code.strip(): self._run_code_snippet(val),
+                    ).pack(side="right", padx=3)
             if "สร้างไฟล์" in text or "เขียนไฟล์" in text:
                 ctk.CTkButton(
                     footer, text=self._t("open_project"), width=82, height=26,
@@ -1810,10 +2496,19 @@ class ChatApp(ctk.CTk):
 
     def _responsive_layout(self, _event: Any = None) -> None:
         if hasattr(self, "sidebar"):
-            compact = self.winfo_width() < 1000
+            width = self.winfo_width()
+            compact = width < 1080
             if compact != self._compact_layout:
                 self._compact_layout = compact
-                self.sidebar.configure(width=220 if compact else 270)
+                if compact:
+                    self.sidebar.configure(width=210)
+                else:
+                    self.sidebar.configure(width=240)
+                if hasattr(self, "inspector"):
+                    if compact:
+                        self.inspector.grid_remove()
+                    elif self._current_view_mode == "chat":
+                        self.inspector.grid(row=0, column=3, sticky="nsew")
 
     def _highlight_markdown(self, body: Any, text: str) -> None:
         target = getattr(body, "_textbox", body)
@@ -1838,23 +2533,32 @@ class ChatApp(ctk.CTk):
                 values[key] = int(value.strip().split()[0])
             used = (values["MemTotal"] - values["MemAvailable"]) / values["MemTotal"] * 100
             cpu = min(100, os.getloadavg()[0] / max(1, os.cpu_count() or 1) * 100)
-            gpu_busy, temperature, vram = "—", "—", "—"
+            gpu_busy, vram = "—", "—"
             for card in Path("/sys/class/drm").glob("card*/device"):
                 busy = card / "gpu_busy_percent"
-                temps = list((card / "hwmon").glob("hwmon*/temp1_input"))
                 if busy.exists():
                     gpu_busy = busy.read_text().strip() + "%"
                     vram_used, vram_total = card / "mem_info_vram_used", card / "mem_info_vram_total"
                     if vram_used.exists() and vram_total.exists():
                         vram = f"{int(vram_used.read_text()) / 1024**3:.1f}/{int(vram_total.read_text()) / 1024**3:.0f}G"
-                    if temps:
-                        temperature = f"{int(temps[0].read_text()) / 1000:.0f}°C"
                     break
             self.sys_cpu.configure(text=f"CPU {cpu:.0f}%")
             self.sys_ram.configure(text=f"RAM {used:.0f}%")
             self.sys_gpu.configure(text=f"GPU {gpu_busy}")
             vram_display = vram.split('/')[0] + "G" if '/' in vram else vram
             self.sys_vram.configure(text=f"VRAM {vram_display}")
+            if hasattr(self, "vram_text_label"):
+                self.vram_text_label.configure(text=f"VRAM  {vram}" if vram != "—" else "VRAM  —")
+            if hasattr(self, "vram_progress") and "/" in vram:
+                try:
+                    parts = vram.replace("G", "").split("/")
+                    used_gb = float(parts[0])
+                    total_gb = float(parts[1])
+                    self.vram_progress.set(min(1.0, max(0.0, used_gb / total_gb)))
+                except (ValueError, IndexError):
+                    pass
+            if hasattr(self, "status_bar_hw_label"):
+                self.status_bar_hw_label.configure(text=f"CPU {cpu:.0f}%  •  RAM {used:.0f}%  •  GPU {gpu_busy}  •  VRAM {vram_display}")
         except Exception:
             pass
         if self.winfo_exists():
@@ -1881,25 +2585,50 @@ class ChatApp(ctk.CTk):
             )
 
     def _render_messages(self) -> None:
+        # Destroy old empty state frame if it exists
+        if hasattr(self, "_empty_state_frame") and self._empty_state_frame.winfo_exists():
+            self._empty_state_frame.destroy()
         for child in self.chat.winfo_children():
             child.destroy()
         self.chat_images.clear()
-        for index, message in enumerate(self.messages):
-            self._append(
-                self._t("you") if message.get("role") == "user" else "LocalForge",
-                str(message.get("content", "")), message_index=index,
-                media_paths=message.get("media_paths"),
-            )
+        if not self.messages:
+            # Re-show premium empty state
+            empty = ctk.CTkFrame(self.chat, fg_color="transparent")
+            empty.grid(sticky="nsew", padx=20, pady=40)
+            empty.grid_columnconfigure(0, weight=1)
+            self._empty_state_frame = empty
+            logo_outer = ctk.CTkFrame(empty, width=72, height=72, corner_radius=22, fg_color=self.ACCENT)
+            logo_outer.grid(pady=(0, 18))
+            logo_outer.pack_propagate(False)
+            ctk.CTkLabel(logo_outer, text="✦", text_color="#FFFFFF",
+                         font=ctk.CTkFont(size=34, weight="bold")).pack(expand=True)
+            ctk.CTkLabel(empty, text=self._t("your_assistant"), text_color=self.TEXT,
+                         font=ctk.CTkFont(size=20, weight="bold")).grid(pady=(0, 6))
+            ctk.CTkLabel(empty, text=self._t("tagline"), text_color=self.MUTED,
+                         font=ctk.CTkFont(family=THAI_FONT, size=12)).grid(pady=(0, 10))
+        else:
+            for index, message in enumerate(self.messages):
+                self._append(
+                    self._t("you") if message.get("role") == "user" else "LocalForge",
+                    str(message.get("content", "")), message_index=index,
+                    media_paths=message.get("media_paths"),
+                )
         self._update_context_meter()
 
+
     def _update_context_meter(self) -> None:
-        if not hasattr(self, "context_button"):
-            return
         report = context_report(self.messages, MODEL_CONTEXT_TOKENS)
         color = ("#EF4444", "#FF9EAE") if report["percent"] >= 85 else ("#F59E0B", "#e5ad45") if report["percent"] >= 65 else self.MUTED
-        self.context_button.configure(
-            text=self._t("context_meter", percent=f"{report['percent']:.0f}"), text_color=color,
-        )
+        if hasattr(self, "context_button"):
+            self.context_button.configure(
+                text=self._t("context_meter", percent=f"{report['percent']:.0f}"), text_color=color,
+            )
+        if hasattr(self, "right_context_label"):
+            self.right_context_label.configure(text=f"{report['used']:,} / {report['maximum']:,} Tokens ({report['percent']:.0f}%)")
+        if hasattr(self, "context_progress"):
+            self.context_progress.set(min(1.0, max(0.0, report['percent'] / 100.0)))
+        if hasattr(self, "context_donut"):
+            self.context_donut.set_values(report["used"], report["maximum"], report["percent"])
 
     def _trim_context(self) -> None:
         if len(self.messages) <= 8:
@@ -1984,12 +2713,16 @@ class ChatApp(ctk.CTk):
         ctk.CTkButton(buttons, text=self._t("summarize_old"), command=lambda: (self._summarize_context(), window.destroy())).pack(side="right")
 
     def _delete_message(self, index: int) -> None:
+        if self.busy:
+            return
         if 0 <= index < len(self.messages):
             del self.messages[index]
             self._save_history()
             self._render_messages()
 
     def _edit_message(self, index: int) -> None:
+        if self.busy:
+            return
         if not (0 <= index < len(self.messages)):
             return
         value = simpledialog.askstring(
@@ -2005,6 +2738,8 @@ class ChatApp(ctk.CTk):
             self.input.focus_set()
 
     def _regenerate_message(self, index: int) -> None:
+        if self.busy:
+            return
         previous = next(
             (self.messages[pos].get("content", "") for pos in range(index - 1, -1, -1) if self.messages[pos].get("role") == "user"),
             "",
@@ -2094,7 +2829,43 @@ class ChatApp(ctk.CTk):
             self.mcp_manager.workspace = self.tools.workspace
             self.file_transaction = FileTransaction(self.tools.workspace, self.state_dir / "backups")
             self.changed_files.clear()
-            self.workspace_button.configure(text="📁 " + str(self.tools.workspace))
+            self.workspace_button.configure(text="❏ " + str(self.tools.workspace))
+            self._save_preferences()
+            threading.Thread(target=self._auto_index_workspace, args=(self.tools.workspace,), daemon=True).start()
+
+    def _set_view_mode(self, mode: str) -> None:
+        self._current_view_mode = mode
+        # Update Dock button highlight: active = accent bg, inactive = transparent
+        for btn_mode, btn in self._dock_buttons.items():
+            if btn_mode == mode:
+                btn.configure(fg_color=self.ACCENT, text_color="#FFFFFF")
+            else:
+                btn.configure(fg_color="transparent", text_color=self.MUTED)
+
+        if mode == "chat":
+            self.editor_frame.grid_forget()
+            self.main_frame.grid(row=0, column=2, sticky="nsew")
+            if hasattr(self, "sidebar"):
+                self.sidebar.grid(row=0, column=1, sticky="nsew", padx=(0, 1))
+            if hasattr(self, "inspector"):
+                if self._compact_layout:
+                    self.inspector.grid_remove()
+                else:
+                    self.inspector.grid(row=0, column=3, sticky="nsew")
+        elif mode == "editor":
+            self.main_frame.grid_forget()
+            if hasattr(self, "sidebar"):
+                self.sidebar.grid_remove()
+            if hasattr(self, "inspector"):
+                self.inspector.grid_remove()
+            self.editor_frame.grid(row=0, column=1, columnspan=3, sticky="nsew")
+        elif mode == "split":
+            if hasattr(self, "sidebar"):
+                self.sidebar.grid_remove()
+            if hasattr(self, "inspector"):
+                self.inspector.grid_remove()
+            self.editor_frame.grid(row=0, column=1, columnspan=2, sticky="nsew")
+            self.main_frame.grid(row=0, column=3, sticky="nsew")
 
     def _refresh_conversations(self) -> None:
         if not hasattr(self, "conversation_list"):
@@ -2207,24 +2978,186 @@ class ChatApp(ctk.CTk):
         ctk.CTkButton(buttons, text=self._t("allow_always"), command=lambda: decide(True, True), fg_color=self.ACCENT).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", lambda: decide(False))
 
+    def _toggle_sidebar_visibility(self) -> None:
+        if hasattr(self, "sidebar"):
+            if self.sidebar.winfo_viewable():
+                self.sidebar.grid_remove()
+            else:
+                self.sidebar.grid()
+
+    def _open_command_palette(self, initial_filter: str = "") -> None:
+        window = ctk.CTkToplevel(self)
+        window.title(self._t("command_palette_title"))
+        window.geometry("620x420")
+        window.transient(self)
+
+        search_var = ctk.StringVar()
+        entry = ctk.CTkEntry(
+            window, textvariable=search_var, placeholder_text=self._t("command_search_hint"),
+            height=38, corner_radius=8, font=ctk.CTkFont(size=12),
+            fg_color=self.PANEL, border_width=1, border_color=self.BORDER
+        )
+        entry.pack(fill="x", padx=16, pady=(16, 8))
+        entry.focus_set()
+
+        results_frame = ctk.CTkScrollableFrame(window, fg_color="transparent")
+        results_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        def populate_results(_event: Any = None) -> None:
+            for child in results_frame.winfo_children():
+                child.destroy()
+            query = search_var.get().strip().lower()
+
+            items: list[tuple[str, Any, str]] = [
+                ("✉ " + self._t("new_chat"), self._clear, "Command"),
+                ("❏ " + self._t("choose_workspace_title"), self._choose_workspace, "Command"),
+                ("▧ " + self._t("rag_manage"), self._open_rag_manager, "Command"),
+                ("◫ " + self._t("project_explorer"), self._open_project_explorer, "Command"),
+                ("⚙ " + self._t("settings"), self._open_settings, "Command"),
+            ]
+            try:
+                found = 0
+                for root, dirs, files in os.walk(self.tools.workspace):
+                    dirs[:] = [d for d in dirs if not d.startswith(".")]
+                    for name in files:
+                        if name.startswith("."):
+                            continue
+                        path = Path(root) / name
+                        rel = str(path.relative_to(self.tools.workspace))
+                        items.append((f"▤ {rel}", lambda p=path: self._open_path(p), "File"))
+                        found += 1
+                        if found >= 30:
+                            break
+                    if found >= 30:
+                        break
+            except Exception:
+                pass
+
+            for name in MODEL_CATALOG:
+                items.append((f"◈ {name}", lambda n=name: self.selected_model_var.set(n), "Model"))
+
+            filtered = [item for item in items if not query or query in item[0].lower()]
+            for label_text, action, category in filtered[:20]:
+                row = ctk.CTkFrame(results_frame, fg_color=self.PANEL, corner_radius=6)
+                row.pack(fill="x", pady=2)
+                name_lbl = ctk.CTkLabel(row, text=label_text, anchor="w", text_color=self.TEXT, font=ctk.CTkFont(size=11))
+                name_lbl.pack(side="left", padx=10, pady=6)
+                kind_lbl = ctk.CTkLabel(row, text=category, text_color=self.MUTED, font=ctk.CTkFont(size=9))
+                kind_lbl.pack(side="right", padx=10)
+
+                def execute(act=action, win=window):
+                    win.destroy()
+                    act()
+
+                row.bind("<Button-1>", lambda _e, act=action: execute(act))
+                name_lbl.bind("<Button-1>", lambda _e, act=action: execute(act))
+                kind_lbl.bind("<Button-1>", lambda _e, act=action: execute(act))
+
+        entry.bind("<KeyRelease>", populate_results)
+        populate_results()
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+        window.grab_set()
+
+    def _run_code_snippet(self, code: str) -> None:
+        def worker() -> None:
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-c", code],
+                    cwd=str(self.tools.workspace),
+                    capture_output=True,
+                    text=True,
+                    timeout=15
+                )
+                output = proc.stdout + (f"\n[STDERR]\n{proc.stderr}" if proc.stderr else "")
+            except Exception as exc:
+                output = f"Execution error: {exc}"
+
+            def update_ui() -> None:
+                win = ctk.CTkToplevel(self)
+                win.title(self._t("code_output_title"))
+                win.geometry("700x480")
+                box = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Noto Sans Mono", size=11), fg_color=self.BG)
+                box.pack(fill="both", expand=True, padx=16, pady=16)
+                box.insert("1.0", output or "Finished with no output.")
+                box.configure(state="disabled")
+
+            self.after(0, update_ui)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _auto_index_workspace(self, folder: Path) -> None:
+        try:
+            api_url = self.api_url_var.get().strip()
+            chunks = 0
+            for path in folder.rglob("*"):
+                if path.is_file() and path.suffix.lower() in TEXT_PROJECT_EXTENSIONS and path.stat().st_size <= MAX_FILE_BYTES:
+                    if any(part.startswith(".") for part in path.parts):
+                        continue
+                    text = path.read_text(encoding="utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    rel = str(path.relative_to(folder))
+                    embedded: list[tuple[str, list[float]]] = []
+                    for block in re.split(r"\n\s*\n", text):
+                        if len(block) > 40:
+                            vec = get_embedding(api_url, block[:500])
+                            if vec:
+                                embedded.append((block[:1500], vec))
+                    if embedded:
+                        self.vector_db.replace_rag_source(rel, embedded)
+                        chunks += len(embedded)
+            if chunks > 0 and hasattr(self, "status"):
+                self.after(0, lambda c=chunks: self.status.configure(text=self._t("auto_indexed", count=c)))
+        except Exception:
+            pass
+
     def _show_diff_review(self, request: dict[str, Any]) -> None:
         window = ctk.CTkToplevel(self)
         window.title(self._t("diff_title"))
-        window.geometry("900x680")
+        window.geometry("960x700")
         window.transient(self)
+
+        top_bar = ctk.CTkFrame(window, fg_color="transparent")
+        top_bar.pack(fill="x", padx=22, pady=(16, 8))
         ctk.CTkLabel(
-            window, text=self._t("diff_count", count=len(request['files'])),
-            font=ctk.CTkFont(family=THAI_FONT, size=20, weight="bold")
-        ).pack(fill="x", padx=22, pady=(20, 8))
-        preview = ctk.CTkTextbox(
-            window, wrap="none", font=ctk.CTkFont(family="Noto Sans Mono", size=12),
-            fg_color=self.BG, border_width=1, border_color=self.BORDER,
+            top_bar, text=self._t("plan_files_change", count=len(request['files'])),
+            font=ctk.CTkFont(family=THAI_FONT, size=16, weight="bold")
+        ).pack(side="left")
+
+        diff_frame = ctk.CTkFrame(window, fg_color="transparent")
+        diff_frame.pack(fill="both", expand=True, padx=22, pady=8)
+
+        # Dual Pane: Original vs Modified (real per-file contents, not the diff)
+        files = request.get("files") or []
+
+        def current_text(path: str) -> str:
+            try:
+                target = self.file_transaction._target(path)
+                return target.read_text(encoding="utf-8") if target.is_file() else ""
+            except (OSError, ValueError):
+                return ""
+
+        orig_text = "\n\n".join(
+            f"===== {path} =====\n" + (current_text(path) or self._t("diff_new_file", path=path))
+            for path, _content in files
         )
-        preview.pack(fill="both", expand=True, padx=22, pady=8)
-        preview.insert("1.0", request["diff"] or self._t("diff_empty"))
-        preview.configure(state="disabled")
+        mod_text = "\n\n".join(
+            f"===== {path} =====\n" + content for path, content in files
+        )
+
+        orig_box = ctk.CTkTextbox(diff_frame, font=ctk.CTkFont(family="Noto Sans Mono", size=11), fg_color=self.PANEL)
+        orig_box.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        orig_box.insert("1.0", "--- ORIGINAL ---\n" + (orig_text or self._t("diff_empty")))
+
+        mod_box = ctk.CTkTextbox(diff_frame, font=ctk.CTkFont(family="Noto Sans Mono", size=11), fg_color=self.PANEL)
+        mod_box.pack(side="right", fill="both", expand=True, padx=(4, 0))
+        mod_box.insert("1.0", "+++ MODIFIED ---\n" + mod_text)
+
+        status_lbl = ctk.CTkLabel(window, text=self._t("ready_to_apply"), text_color="#10B981", font=ctk.CTkFont(size=11))
+        status_lbl.pack(fill="x", padx=22, pady=(4, 8))
+
         buttons = ctk.CTkFrame(window, fg_color="transparent")
-        buttons.pack(fill="x", padx=22, pady=(6, 20))
+        buttons.pack(fill="x", padx=22, pady=(0, 16))
 
         def decide(approved: bool) -> None:
             request["approved"] = approved
@@ -2232,7 +3165,7 @@ class ChatApp(ctk.CTk):
             window.destroy()
 
         ctk.CTkButton(buttons, text=self._t("cancel"), command=lambda: decide(False), fg_color="#713747").pack(side="left")
-        ctk.CTkButton(buttons, text=self._t("diff_approve"), command=lambda: decide(True), fg_color=self.ACCENT).pack(side="right")
+        ctk.CTkButton(buttons, text=self._t("apply"), command=lambda: decide(True), fg_color=self.ACCENT).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", lambda: decide(False))
         window.grab_set()
 
@@ -2252,12 +3185,14 @@ class ChatApp(ctk.CTk):
             messagebox.showwarning(self._t("undo_title"), str(exc))
 
     def _open_path(self, path: Path) -> None:
+        if path.is_dir():
+            self._open_project_explorer()
+            return
         if path.suffix.lower() in {".html", ".htm"}:
             webbrowser.open(path.resolve().as_uri())
             return
-        opener = shutil.which("xdg-open")
-        if opener:
-            subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.code_editor.open_file(path)
+        self._set_view_mode("split")
 
     def _open_terminal(self) -> None:
         workspace = str(self.tools.workspace)
@@ -2303,7 +3238,19 @@ class ChatApp(ctk.CTk):
             nodes = {self.tools.workspace: ""}
             root_id = tree.insert("", "end", text=self.tools.workspace.name, open=True, values=("dir",))
             nodes[self.tools.workspace] = root_id
-            items = sorted(self.tools.workspace.rglob("*"), key=lambda p: (len(p.parts), not p.is_dir(), p.name.lower()))
+            collected: list[Path] = []
+            for root, dirs, files in os.walk(self.tools.workspace):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for d in dirs:
+                    collected.append(Path(root) / d)
+                for name in files:
+                    if name.startswith("."):
+                        continue
+                    collected.append(Path(root) / name)
+                if len(collected) >= 1200:
+                    dirs[:] = []
+                    break
+            items = sorted(collected, key=lambda p: (len(p.parts), not p.is_dir(), p.name.lower()))
             for path in items[:1200]:
                 try:
                     relative = str(path.relative_to(self.tools.workspace))
@@ -2426,7 +3373,8 @@ class ChatApp(ctk.CTk):
     def _model_selected(self, value: str | None = None) -> None:
         value = value or self.selected_model_var.get()
         try:
-            model_path = self.model_manager.root / value if value else Path()
+            resolved = self._resolve_model_path(value) if value else None
+            model_path = self.model_manager.root / resolved if resolved else Path()
             info = inspect_model(model_path)
             text = self._t(
                 "model_info_fmt",
@@ -2532,7 +3480,7 @@ class ChatApp(ctk.CTk):
             try:
                 client = GemmaClient(self.api_url_var.get().strip(), "local")
                 started = time.monotonic()
-                answer = client.generate([{"role": "user", "content": "เขียนรายการเลข 1 ถึง 30 คั่นด้วยช่องว่างเท่านั้น"}], False)
+                client.generate([{"role": "user", "content": "เขียนรายการเลข 1 ถึง 30 คั่นด้วยช่องว่างเท่านั้น"}], False)
                 elapsed = time.monotonic() - started
                 speed = client.last_completion_tokens / elapsed if elapsed else 0
                 self.events.put(("benchmark", self._t(
@@ -2912,6 +3860,8 @@ class ChatApp(ctk.CTk):
         window.after(80, show_settings)
 
     def _clear(self) -> None:
+        if self.busy:
+            return
         self.conversation_store.create()
         self.messages = []
         self._save_history()
@@ -2956,10 +3906,12 @@ class ChatApp(ctk.CTk):
             self.status.configure(text=self._t("rag_indexing", count=len(chunks)), text_color="#34D399")
 
             def worker():
+                embedded: list[tuple[str, list[float]]] = []
                 for i, chunk in enumerate(chunks):
                     emb = get_embedding(self.api_url_var.get().strip(), chunk)
                     if emb:
-                        self.vector_db.add_rag_chunk(Path(value).name, chunk, emb)
+                        embedded.append((chunk, emb))
+                self.vector_db.replace_rag_source(Path(value).name, embedded)
                 self.events.put(("tool", self._t("rag_indexed", name=Path(value).name)))
 
             threading.Thread(target=worker, daemon=True).start()
@@ -3074,6 +4026,7 @@ class ChatApp(ctk.CTk):
                     self._attach_media_path(self.recording_path)
                 except Exception as exc:
                     messagebox.showerror(self._t("error"), str(exc))
+            self._update_media_status()
             return
         recorder = shutil.which("pw-record")
         if not recorder:
@@ -3340,6 +4293,7 @@ class ChatApp(ctk.CTk):
                 print(f"Cache check error: {e}")
 
             # --- RAG: Vector Search ---
+            rag_messages: list[dict[str, Any]] | None = None
             try:
                 if self.vector_db and not media and 'query_embedding' in locals() and query_embedding:
                     rag_results = self.vector_db.search_rag(query_embedding)
@@ -3347,10 +4301,12 @@ class ChatApp(ctk.CTk):
                         self.events.put(("tool", self._t("rag_found", count=len(rag_results))))
                         context_str = "\n\n".join([f"[{r['source']}]\n{r['content']}" for r in rag_results])
                         augmented_prompt = self._t("rag_prompt", context=context_str, question=original_request)
-                        # Replace the last user message in the session with the augmented prompt
-                        for i in range(len(self.messages)-1, -1, -1):
-                            if self.messages[i]["role"] == "user":
-                                self.messages[i]["content"] = augmented_prompt
+                        # Augment a working copy so the retrieved context reaches the
+                        # model without polluting the persisted conversation history.
+                        rag_messages = [dict(m) for m in self.messages]
+                        for i in range(len(rag_messages)-1, -1, -1):
+                            if rag_messages[i]["role"] == "user":
+                                rag_messages[i]["content"] = augmented_prompt
                                 break
             except Exception as e:
                 print(f"RAG search error: {e}")
@@ -3364,7 +4320,7 @@ class ChatApp(ctk.CTk):
             client = GemmaClient(api_url, model, tool_schemas)
             if requests_action(original_request) and not selected_mcp:
                 recent_user_messages = select_recent_messages(
-                    [m for m in self.messages if m["role"] == "user"], 3500
+                    [m for m in (rag_messages or self.messages) if m["role"] == "user"], 3500
                 )
                 request_context = "\n".join(
                     str(message.get("content", "")) for message in recent_user_messages
@@ -3415,8 +4371,10 @@ class ChatApp(ctk.CTk):
                 return
             action_nudge_used = False
             enable_tools = bool(tool_schemas)
-            for _ in range(MAX_TOOL_ROUNDS):
-                recent_context = with_media(self._recent_context(self.messages), media or [])
+            for round_num in range(MAX_TOOL_ROUNDS):
+                recent_context = with_media(
+                    self._recent_context(rag_messages if round_num == 0 else self.messages), media or []
+                )
                 self.hooks.before_model(
                     len(recent_context),
                     sum(estimate_tokens(str(item.get("content", ""))) for item in recent_context),

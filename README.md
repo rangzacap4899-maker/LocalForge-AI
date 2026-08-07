@@ -119,12 +119,13 @@ CPU หรือ backend อื่น โปรดดูเอกสารขอ
 
 ## เพิ่มไอคอนในเมนูแอป
 
-ไฟล์ desktop entry ที่ให้มาใช้ตำแหน่ง `/home/addrang/LocalForge-AI` หากติดตั้ง
-ไว้ตำแหน่งอื่น ให้แก้ค่า `Exec` ก่อนคัดลอก:
+ไฟล์ `packaging/localforge-ai.desktop` ใน Git เป็น template สำหรับอ้างอิง
+ไม่ควรคัดลอกโดยตรงเพราะ desktop entry ต้องใช้ absolute path ให้รัน installer
+เพื่อสร้าง entry ที่ตรงกับตำแหน่งจริง:
 
 ```bash
 mkdir -p ~/.local/share/applications
-cp packaging/localforge-ai.desktop ~/.local/share/applications/
+./install.sh --skip-deps
 ```
 
 ## การใช้งาน

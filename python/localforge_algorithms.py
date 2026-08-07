@@ -53,6 +53,7 @@ class VectorDB:
                     embedding TEXT
                 )
             """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_source ON rag_chunks(source)")
 
     def add_to_cache(self, query: str, embedding: list[float], response: str):
         with sqlite3.connect(self.db_path) as conn:
@@ -84,6 +85,15 @@ class VectorDB:
             conn.execute(
                 "INSERT INTO rag_chunks (source, content, embedding) VALUES (?, ?, ?)",
                 (source, content, json.dumps(embedding))
+            )
+
+    def replace_rag_source(self, source: str, chunks: list[tuple[str, list[float]]]) -> None:
+        """Replace one indexed document atomically, avoiding duplicate re-indexing."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM rag_chunks WHERE source = ?", (source,))
+            conn.executemany(
+                "INSERT INTO rag_chunks (source, content, embedding) VALUES (?, ?, ?)",
+                [(source, content, json.dumps(embedding)) for content, embedding in chunks],
             )
 
     def search_rag(self, query_embedding: list[float], top_k: int = 3) -> list[dict[str, Any]]:

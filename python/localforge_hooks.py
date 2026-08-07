@@ -41,6 +41,10 @@ class HookEngine:
         self.audit_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self.audit_path.open("a", encoding="utf-8") as output:
             output.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        try:
+            self.audit_path.chmod(0o600)
+        except OSError:
+            pass
 
     def before_model(self, message_count: int, prompt_tokens: int) -> None:
         self._audit("before_model", message_count=message_count, prompt_tokens=prompt_tokens)

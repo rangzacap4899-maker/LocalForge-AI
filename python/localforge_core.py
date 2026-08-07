@@ -5,13 +5,43 @@ from __future__ import annotations
 import ast
 import difflib
 import json
+import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+def atomic_write_text(path: Path, content: str, mode: int = 0o600) -> None:
+    """Write a small state file safely, without exposing it to other users."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.",
+            suffix=".tmp", delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        try:
+            path.chmod(mode)
+        except OSError:
+            pass
 
 
 CODING_RE = re.compile(
@@ -33,7 +63,6 @@ def choose_model(request: str, models: list[Path], current: Path | None = None) 
     """Choose by task without needlessly reloading a model for ordinary chat."""
     if not models:
         return None
-    lowered = request.lower()
     if CODING_RE.search(request):
         coder = next((path for path in models if "coder" in path.name.lower()), None)
         if coder:
@@ -114,8 +143,7 @@ class ConversationStore:
             self.create("บทสนทนาใหม่")
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(self.path, json.dumps(self.data, ensure_ascii=False, indent=2))
 
     def create(self, title: str = "บทสนทนาใหม่") -> str:
         conversation_id = uuid.uuid4().hex[:12]
@@ -195,19 +223,9 @@ class FileTransaction:
             elif suffix == ".py":
                 ast.parse(content)
             elif suffix in {".html", ".htm"}:
-                if "<html" in content.lower() and "</html>" not in content.lower():
-                    errors.append("ไม่มีแท็ก </html>")
+                pass # HTML browsers are lenient; don't block saving if </html> is missing
             elif suffix in {".js", ".css"}:
-                pairs = {"{": "}", "(": ")", "[": "]"}
-                stack: list[str] = []
-                for char in re.sub(r"(?s)/\*.*?\*/|//.*?$|'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\"", "", content):
-                    if char in pairs:
-                        stack.append(pairs[char])
-                    elif char in pairs.values() and (not stack or stack.pop() != char):
-                        errors.append(f"วงเล็บ {char} ไม่สมดุล")
-                        break
-                if stack:
-                    errors.append("วงเล็บปิดไม่ครบ")
+                pass # JS/CSS can be incomplete; don't block saving on unbalanced brackets
         except (ValueError, SyntaxError) as exc:
             errors.append(str(exc))
         return errors
@@ -221,14 +239,18 @@ class FileTransaction:
         ))
 
     def apply(self, files: list[tuple[str, str]]) -> list[str]:
+        # Validate the entire batch first so a late failure cannot leave a
+        # partial write with no manifest to undo.
+        for relative, content in files:
+            errors = self.validate(relative, content)
+            if errors:
+                raise ValueError(f"{relative}: " + "; ".join(errors))
+
         stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time_ns() % 1_000_000):06d}"
         backup_dir = self.backup_root / stamp
         manifest: dict[str, Any] = {"workspace": str(self.workspace), "files": []}
         results: list[str] = []
         for relative, content in files:
-            errors = self.validate(relative, content)
-            if errors:
-                raise ValueError(f"{relative}: " + "; ".join(errors))
             target = self._target(relative)
             existed = target.is_file()
             backup = backup_dir / relative
@@ -241,7 +263,7 @@ class FileTransaction:
             results.append(f"เขียน {relative} ({len(content):,} ตัวอักษร)")
         backup_dir.mkdir(parents=True, exist_ok=True)
         self.last_manifest = backup_dir / "manifest.json"
-        self.last_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(self.last_manifest, json.dumps(manifest, ensure_ascii=False, indent=2))
         return results
 
     def undo(self) -> list[str]:

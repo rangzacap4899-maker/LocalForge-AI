@@ -3,7 +3,9 @@ Type=Application
 Version=1.0
 Name=LocalForge AI
 Comment=ผู้ช่วย AI ภายในเครื่องสำหรับสนทนา สร้างไฟล์ และค้นเว็บ
-Exec=/home/addrang/LocalForge-AI/launch_localforge_ai.sh
+# This checked-in file is a template. Run ./install.sh to generate a portable
+# user-specific entry with the correct absolute application path.
+Exec=localforge-ai
 Icon=system-help
 Terminal=false
 Categories=Utility;Development;

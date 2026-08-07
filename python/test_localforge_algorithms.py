@@ -22,6 +22,12 @@ class VectorDBTest(unittest.TestCase):
         self.db.clear_rag()
         self.assertEqual(self.db.counts(), (0, 0))
 
+    def test_replace_rag_source_does_not_duplicate_reindex(self):
+        self.db.replace_rag_source("doc.md", [("old", [1.0, 0.0])])
+        self.db.replace_rag_source("doc.md", [("new", [0.0, 1.0])])
+        self.assertEqual(self.db.counts(), (1, 0))
+        self.assertEqual(self.db.search_rag([0.0, 1.0])[0]["content"], "new")
+
     def test_add_and_clear_cache(self):
         self.db.add_to_cache("คำถาม", [0.0, 1.0], "คำตอบ")
         self.assertEqual(self.db.counts(), (0, 1))
