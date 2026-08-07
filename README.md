@@ -34,7 +34,8 @@ LocalForge AI คือแอปเดสก์ท็อปสำหรับใ
 
 - Linux (พัฒนาบน Bazzite/Fedora)
 - Python 3.10 ขึ้นไป พร้อม Tkinter
-- `git`, `cmake` และ compiler สำหรับสร้าง `llama.cpp`
+- `git`, `cmake` และ compiler — **เฉพาะ**ถ้าจะ build `llama.cpp` จากซอร์ส
+  (การติดตั้งแบบปกติใช้ binary สำเร็จรูป ไม่ต้องมี)
 - การ์ดจอที่รองรับ Vulkan หรือใช้ `llama.cpp` backend อื่นที่เหมาะกับเครื่อง
 - RAM/VRAM และพื้นที่จัดเก็บตามขนาดโมเดลที่เลือก
 
@@ -92,19 +93,26 @@ python3 -m venv .venv
 .venv/bin/pip install -r python/chatbot_requirements.txt
 ```
 
-### 3. สร้าง llama.cpp พร้อม Vulkan
+### 3. ติดตั้ง llama-server
+
+รัน installer อีกครั้ง หรือเรียกด้วยโหมดติดตั้ง `llama-server` โดยตรง — จะดาวน์โหลด
+binary สำเร็จรูปจาก [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases)
+ไปไว้ที่ `runtime/llama.cpp/build-vulkan/bin/` ให้อัตโนมัติ (ตรวจหา Vulkan driver:
+มี → vulkan build, ไม่มี → cpu build):
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp.git runtime/llama.cpp
-cmake -S runtime/llama.cpp -B runtime/llama.cpp/build-vulkan \
-  -DGGML_VULKAN=ON \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build runtime/llama.cpp/build-vulkan --target llama-server -j4
+./install.sh --skip-deps --llama auto
 ```
 
-ใช้ `-j4` เพื่อจำกัดงาน build พร้อมกันไม่ให้ใช้ RAM มากเกินไป หากต้องการใช้
-CPU หรือ backend อื่น โปรดดูเอกสารของ
-[llama.cpp](https://github.com/ggml-org/llama.cpp)
+ตัวเลือกอื่น:
+
+- `--llama vulkan` / `--llama cpu` — บังคับ build แบบ Vulkan หรือ CPU
+- `--llama-tag b10312` — กำหนดเวอร์ชัน release ของ llama.cpp (ค่าเริ่มต้น: ล่าสุด)
+- `--llama skip` — ข้ามการติดตั้ง
+
+หากต้องการ build จากซอร์สแทน (เช่นใช้ backend อื่นเช่น CUDA/ROCm) ให้ทำตาม
+เอกสารของ [llama.cpp](https://github.com/ggml-org/llama.cpp) แล้วใช้ flag
+`--llama skip`:
 
 ### 4. เปิดโปรแกรม
 
